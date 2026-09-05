@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Codex Context Orb hook snapshot v1",
+  "description": "Locally received lifecycle metadata. It provides no foreground binding or context occupancy measurement.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "source", "session_id", "turn_id", "observed_at_ms", "last_event_name", "model", "trigger", "context_used_tokens", "context_window_tokens", "binding"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "source": {"const": "codex-hook"},
+    "session_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"},
+    "turn_id": {"anyOf": [{"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"}, {"type": "null"}]},
+    "observed_at_ms": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
+    "last_event_name": {"enum": ["SessionStart", "UserPromptSubmit", "PreCompact", "PostCompact", "Stop", "Interrupt"]},
+    "model": {"anyOf": [{"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,95}$"}, {"type": "null"}]},
+    "trigger": {"enum": ["manual", "auto", null]},
+    "context_used_tokens": {"type": "null"},
+    "context_window_tokens": {"type": "null"},
+    "binding": {"const": "unbound"}
+  },
+  "allOf": [{
+    "if": {"properties": {"last_event_name": {"not": {"enum": ["PreCompact", "PostCompact"]}}}},
+    "then": {"properties": {"trigger": {"type": "null"}}}
+  }]
+}

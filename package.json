@@ -1,0 +1,40 @@
+{
+  "name": "codex-context-orb",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A quiet, local context companion for Codex. Cross-platform foundation and interactive design preview.",
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 --port 1427 --strictPort",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview --host 127.0.0.1 --port 1427 --strictPort",
+    "test": "vitest run",
+    "test:ui": "playwright test",
+    "check": "npm run test && npm run build",
+    "tauri": "tauri",
+    "desktop:dev": "tauri dev",
+    "desktop:build": "tauri build"
+  },
+  "dependencies": {
+    "@fontsource-variable/dm-sans": "^5.3.0",
+    "@tauri-apps/api": "^2.0.0",
+    "lucide-react": "^0.468.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.51.0",
+    "@tauri-apps/cli": "^2.0.0",
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^4.5.0",
+    "typescript": "~5.8.3",
+    "vite": "^6.3.0",
+    "vitest": "^3.2.0"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  }
+}

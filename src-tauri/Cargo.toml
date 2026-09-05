@@ -1,0 +1,20 @@
+[package]
+name = "codex-context-orb"
+version = "0.1.0"
+description = "An independent local context companion for Codex"
+authors = ["Codex Context Orb contributors"]
+edition = "2021"
+license = "MIT"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["macos-private-api"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dirs = "6"
+sha2 = "0.10"
+
+[dev-dependencies]
+tempfile = "3"

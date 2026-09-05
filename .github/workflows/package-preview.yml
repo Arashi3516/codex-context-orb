@@ -1,0 +1,41 @@
+name: Package development preview
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            target: aarch64-apple-darwin
+            artifact: macos-apple-silicon-preview
+          - os: macos-14
+            target: x86_64-apple-darwin
+            artifact: macos-intel-preview
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: windows-x64-preview
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - run: npm ci
+      - run: npm run check
+      - run: npm run desktop:build -- --target ${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: src-tauri/target/${{ matrix.target }}/release/bundle/
+          if-no-files-found: error
+# Development artifacts only. Production signing, notarization, upgrades and
+# operating-system acceptance are separate release gates. This does not publish
+# a GitHub Release or submit anything to the OpenAI plugin directory.

@@ -1,0 +1,12 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "orb-window",
+  "description": "Local orb window positioning and one bounded metadata reader; no shell or arbitrary filesystem access.",
+  "windows": ["orb"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-set-size",
+    "core:window:allow-set-position",
+    "core:window:allow-start-dragging"
+  ]
+}

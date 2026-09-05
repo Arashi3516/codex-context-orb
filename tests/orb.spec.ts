@@ -1,0 +1,81 @@
+import { expect, test } from '@playwright/test'
+
+test.beforeEach(async ({ page }) => { await page.goto('/') })
+
+test('all states are explainable and unknown has no percent', async ({ page }) => {
+  const panel = page.getByTestId('orb-panel')
+  for (const [name, percent] of [['余量充足', '42%'], ['建议交接', '94%'], ['留意余量', '82%']]) {
+    await page.getByRole('group', { name: '演示状态' }).getByRole('button', { name }).click()
+    await expect(panel.locator('.capacity-value')).toContainText(percent)
+  }
+  await page.getByRole('button', { name: '数据未知' }).click()
+  await expect(panel.locator('.capacity-value')).not.toContainText('%')
+  await expect(panel).toContainText('等待数据')
+})
+
+test('pinning and snooze stay isolated across background events and session switches', async ({ page }) => {
+  await page.getByRole('button', { name: '模拟后台会话更新' }).click()
+  await expect(page.getByTestId('bound-session')).toHaveText('设置页交互优化')
+  await page.getByRole('button', { name: '稍后提醒', exact: true }).click()
+  await expect(page.locator('.orb-button')).toHaveClass(/snoozed/)
+  await page.getByRole('button', { name: '展开 Context Orb' }).click()
+  await page.getByRole('button', { name: '选择固定会话' }).click()
+  await page.getByRole('button', { name: /^API 重试边界检查/ }).click()
+  await expect(page.locator('.orb-button')).not.toHaveClass(/snoozed/)
+  await page.getByRole('button', { name: '选择固定会话' }).click()
+  await page.getByRole('button', { name: /^设置页交互优化/ }).click()
+  await expect(page.locator('.orb-button')).toHaveClass(/snoozed/)
+  await page.getByRole('button', { name: '提醒设置' }).click()
+  await page.getByRole('button', { name: '恢复', exact: true }).click()
+  await expect(page.locator('.orb-button')).not.toHaveClass(/snoozed/)
+  await page.getByRole('button', { name: '返回概览' }).click()
+  await page.getByRole('button', { name: '选择固定会话' }).click()
+  await page.getByRole('button', { name: '解除固定' }).click()
+  await expect(page.getByTestId('bound-session')).toHaveText('尚未固定会话')
+})
+
+test('handoff is editable and copies exactly the reviewed template', async ({ page, context }) => {
+  await context.grantPermissions(['clipboard-read', 'clipboard-write'])
+  await page.getByRole('button', { name: '准备会话交接' }).click()
+  const text = page.getByRole('textbox', { name: '交接摘要模板' })
+  await expect(text).toContainText('待填写的交接模板')
+  await text.fill('目标：完成设置页\n已验证：键盘导航\n下一步：检查错误反馈')
+  await page.getByRole('button', { name: '复制交接模板' }).click()
+  await expect(page.getByRole('status')).toContainText('已复制')
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(await text.inputValue())
+})
+
+test('drag and right click do not toggle; keyboard and help focus work', async ({ page }) => {
+  const orb = page.locator('.orb-button')
+  const box = (await orb.boundingBox())!
+  await page.mouse.move(box.x + 40, box.y + 40)
+  await page.mouse.down()
+  await page.mouse.move(box.x - 30, box.y + 10, { steps: 8 })
+  await page.mouse.up()
+  await expect(page.getByTestId('orb-panel')).toBeVisible()
+  await orb.click({ button: 'right' })
+  await expect(page.getByTestId('orb-panel')).toBeVisible()
+  await page.keyboard.press('Escape')
+  await orb.focus()
+  await page.keyboard.press('Enter')
+  await expect(page.getByTestId('orb-panel')).not.toBeVisible()
+  await page.keyboard.press('Space')
+  await expect(page.getByTestId('orb-panel')).toBeVisible()
+  await page.getByRole('button', { name: '查看设计说明' }).click()
+  await expect(page.getByRole('button', { name: '关闭设计说明' })).toBeFocused()
+  await page.keyboard.press('Shift+Tab')
+  await expect(page.getByRole('button', { name: '开始体验' })).toBeFocused()
+  await page.keyboard.press('Escape')
+  await expect(page.getByRole('button', { name: '查看设计说明' })).toBeFocused()
+})
+
+test('narrow layout and theme changes retain usable controls', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+  await page.getByRole('button', { name: '切换主题', exact: true }).click()
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark')
+  await page.getByRole('button', { name: '切换主题', exact: true }).click()
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'light')
+  await page.getByRole('button', { name: '准备会话交接' }).click()
+  await expect(page.getByRole('textbox', { name: '交接摘要模板' })).toBeVisible()
+})
