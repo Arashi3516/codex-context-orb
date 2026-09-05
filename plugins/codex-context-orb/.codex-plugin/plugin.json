@@ -1,23 +1,31 @@
 {
   "name": "codex-context-orb",
-  "version": "0.1.0",
-  "description": "Local context-health companion with a focused skill and asynchronous metadata-only lifecycle hooks.",
+  "version": "0.2.0",
+  "description": "Local semantic integrity reviews with evidence, clean handoffs and metadata-only lifecycle hooks.",
   "author": {
     "name": "Codex Context Orb contributors"
   },
   "license": "MIT",
   "homepage": "https://github.com/Arashi3516/codex-context-orb",
   "repository": "https://github.com/Arashi3516/codex-context-orb",
-  "keywords": ["context", "session-health", "local", "desktop"],
+  "keywords": [
+    "context",
+    "session-health",
+    "local",
+    "desktop"
+  ],
   "skills": "./skills/",
   "interface": {
     "displayName": "Codex Context Orb",
-    "shortDescription": "Inspect local lifecycle evidence and prepare a handoff.",
-    "longDescription": "A development-stage companion for the separate Codex Context Orb desktop app. Hooks save bounded lifecycle metadata locally; the skill explains unknown context values and helps prepare a user-requested handoff. Automatic foreground tracking and semantic health assessment are not implemented.",
+    "shortDescription": "Review semantic integrity and prepare a clean handoff.",
+    "longDescription": "An independent companion for the Context Orb desktop app. User-requested skill reviews save minimal local evidence; hooks save bounded lifecycle metadata. Automatic background review and foreground tracking are not implemented.",
     "developerName": "Codex Context Orb contributors",
     "websiteURL": "https://github.com/Arashi3516/codex-context-orb",
     "category": "Productivity",
-    "capabilities": ["Read", "Write"],
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
     "defaultPrompt": [
       "Check the context-health evidence for this session.",
       "Prepare a concise handoff for a fresh session."

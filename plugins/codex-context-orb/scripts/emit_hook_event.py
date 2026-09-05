@@ -97,7 +97,16 @@ def write_snapshot(snapshot: dict, root: Path) -> Path:
         with tempfile.NamedTemporaryFile(mode="wb", prefix=".orb-", suffix=".tmp", dir=events, delete=False) as handle:
             temporary = Path(handle.name)
             handle.write(content)
-        os.replace(temporary, destination)
+        # Windows may briefly deny replacement while another hook replaces the
+        # same path. Retry only its transient sharing/access errors, within 150ms.
+        for attempt in range(5):
+            try:
+                os.replace(temporary, destination)
+                break
+            except PermissionError as error:
+                if getattr(error, "winerror", None) not in (5, 32, 33) or attempt == 4:
+                    raise
+                time.sleep(0.01 * 2 ** attempt)
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)

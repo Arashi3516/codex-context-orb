@@ -5,15 +5,15 @@ import {
   ChevronRight, CircleHelp, Copy, ExternalLink, Folder, Github, Info, Layers,
   LockKeyhole, Moon, MoreHorizontal, Pin, Plus, Settings2, ShieldCheck, Sun, X,
 } from 'lucide-react'
-import { createHandoffTemplate, evaluateContext, formatTokens, resolvePinned } from './lib/context'
+import { createHandoffTemplate, createReviewPrompt, evaluateContext, resolvePinned, SIGNAL_LABELS } from './lib/context'
 import type { ContextSnapshot, HealthLevel } from './lib/context'
 import { demoSessions, DEMO_PRIMARY_ID } from './lib/demo'
-import { dragNativeWindow, isNative, readHookSessions, sizeOrbWindow } from './lib/native'
+import { dragNativeWindow, isNative, readLocalSessions, sizeOrbWindow } from './lib/native'
 
-type PanelView = 'overview' | 'sessions' | 'handoff' | 'settings'
+type PanelView = 'overview' | 'sessions' | 'handoff' | 'settings' | 'evidence' | 'review'
 const widgetSurface = isNative || new URLSearchParams(location.search).get('surface') === 'orb'
 const scenarioLabels: Record<HealthLevel, string> = {
-  healthy: '余量充足', watch: '留意余量', handoff: '建议交接', unknown: '数据未知',
+  healthy: '压缩后清晰', watch: '局部混杂', handoff: '建议新开', unknown: '证据不足',
 }
 
 function readPreference(key: string, fallback: string) {
@@ -31,8 +31,8 @@ function OrbMark({ className = '' }: { className?: string }) {
 
 export default function App() {
   const [theme, setTheme] = useState(() => readPreference('orb:theme', 'light'))
-  const [scenario, setScenario] = useState<HealthLevel>('watch')
-  const [sessions, setSessions] = useState<ContextSnapshot[]>(() => isNative ? [] : demoSessions('watch'))
+  const [scenario, setScenario] = useState<HealthLevel>('handoff')
+  const [sessions, setSessions] = useState<ContextSnapshot[]>(() => isNative ? [] : demoSessions('handoff'))
   const [pinnedId, setPinnedId] = useState<string | null>(() => isNative ? readPreference('orb:pinned', '') || null : DEMO_PRIMARY_ID)
   const [expanded, setExpanded] = useState(!widgetSurface)
   const [view, setView] = useState<PanelView>('overview')
@@ -53,6 +53,8 @@ export default function App() {
   const resizeQueue = useRef(Promise.resolve())
   const snapshot = resolvePinned(sessions, pinnedId)
   const health = evaluateContext(snapshot, now)
+  const assessment = snapshot?.assessment
+  const reviewPrompt = createReviewPrompt(isNative ? pinnedId : null)
   const snoozed = !!pinnedId && now < (snoozedSessions[pinnedId] ?? 0)
 
   useEffect(() => {
@@ -73,7 +75,7 @@ export default function App() {
       if (pending) return
       pending = true
       try {
-        const fresh = await readHookSessions()
+        const fresh = await readLocalSessions(pinnedId)
         if (!cancelled) { setSessions(fresh); setConnectionError(false) }
       } catch {
         if (!cancelled) { setSessions([]); setConnectionError(true) }
@@ -82,7 +84,7 @@ export default function App() {
     void refresh()
     const timer = window.setInterval(() => void refresh(), 3000)
     return () => { cancelled = true; window.clearInterval(timer) }
-  }, [])
+  }, [pinnedId])
   useEffect(() => {
     if (!isNative) return
     resizeQueue.current = resizeQueue.current.then(() => sizeOrbWindow(expanded)).catch(() => {
@@ -95,7 +97,10 @@ export default function App() {
     return () => window.clearTimeout(timer)
   }, [toast])
   useEffect(() => {
-    if (expanded) panelRef.current?.focus({ preventScroll: true })
+    if (expanded && panelRef.current) {
+      panelRef.current.scrollTop = 0
+      panelRef.current.focus({ preventScroll: true })
+    }
   }, [expanded, view])
   useEffect(() => {
     if (!help) return
@@ -126,13 +131,25 @@ export default function App() {
     setHandoff(createHandoffTemplate(snapshot))
     setView('handoff')
   }
-  async function copyHandoff() {
+  async function copyText(value: string, notice: string) {
     try {
-      await navigator.clipboard.writeText(handoff)
-      setToast('已复制。核实内容后，粘贴到新会话。')
+      await navigator.clipboard.writeText(value)
+      setToast(notice)
     } catch {
       setToast('无法访问剪贴板，请在文本框内全选并复制。')
     }
+  }
+  function simulateClarification() {
+    if (isNative) return
+    setSessions(current => current.map(item => item.id !== pinnedId || !item.assessment ? item : {
+      ...item, assessment: { ...item.assessment, reviewed_at_ms: Date.now(),
+        signals: item.assessment.signals.map(signal => ({ ...signal, status: 'resolved' })),
+        review_note: '演示复查：已重新确认主动保存约束，最近修改已恢复一致；旧冲突不再计入提醒。',
+      },
+    }))
+    setScenario('healthy')
+    setView('overview')
+    setToast('已模拟澄清与复查。已解决的问题不再触发建议。')
   }
   function snooze() {
     if (!pinnedId) return
@@ -185,7 +202,7 @@ export default function App() {
       role="dialog" aria-label="会话状态" onKeyDown={event => { if (event.key === 'Escape') closePanel() }}
     >
       <header className="panel-top">
-        <div className="panel-brand"><OrbMark /><span>Context Orb</span><span className="version-pill">预览</span></div>
+        <div className="panel-brand"><OrbMark /><span>Context Orb</span><span className="version-pill">v0.2 预览</span></div>
         <button className="icon-button" aria-label="收起面板" onClick={closePanel}><X size={17} /></button>
       </header>
       {view !== 'overview' && <button className="back-button" onClick={() => setView('overview')}><ArrowLeft size={14} />返回概览</button>}
@@ -200,49 +217,74 @@ export default function App() {
           <h2>{health.headline}</h2>
           <p>{health.description}</p>
         </div>
-        <div className="capacity-card">
-          <div className="capacity-label"><span>上下文使用</span><span className="source-label">{snapshot?.source === 'demo' ? '模拟数据' : '用量待接入'}</span></div>
-          <div className="capacity-value"><strong>{health.percent === null ? '—' : Math.round(health.percent)}<span>{health.percent !== null && '%'}</span></strong><span>{formatTokens(snapshot?.usedTokens ?? null)}<span className="capacity-divider"> / </span>{formatTokens(snapshot?.windowTokens ?? null)}</span></div>
-          <div className="capacity-track" aria-hidden="true"><div style={{ width: `${health.percent ?? 0}%` }} /><i style={{ left: '75%' }} /><i style={{ left: '90%' }} /></div>
-          <div className="capacity-foot"><span>{snapshot?.compactions === null || !snapshot ? '压缩次数未知' : `已压缩 ${snapshot.compactions} 次`}</span><span>{health.percent === null ? '不推测未知数值' : `剩余 ${Math.round(100 - health.percent)}%`}</span></div>
+        <div className="semantic-card" data-testid="semantic-card">
+          <div className="semantic-card-label"><span>压缩后的执行脉络</span><span className="source-label">{snapshot?.source === 'demo' ? '模拟评估' : assessment ? 'Codex 手动评估' : '尚未评估'}</span></div>
+          {health.level !== 'unknown' && assessment ? <>
+            <div className="semantic-facts"><div><strong>{assessment.compactions_observed ?? '—'}<span> 次</span></strong><small>已观察的压缩</small></div><span className="fact-separator" /><div><strong>{health.actionable.length}<span> 项</span></strong><small>影响下一步的疑点</small></div></div>
+            {health.actionable.length ? <div className="signal-previews">{health.actionable.slice(0, 2).map(signal => <div className="signal-preview" key={signal.id}><i /><span>{SIGNAL_LABELS[signal.kind]}</span><small>{signal.recurrence === 'after_correction' ? '纠正后再次出现' : '仍待核对'}</small></div>)}</div>
+              : <div className="clear-result"><ShieldCheck size={16} /><span>当前目标、约束与有效结论保持一致</span></div>}
+            <button className="evidence-link" onClick={() => setView('evidence')}>查看评估依据<ArrowUpRight size={14} /></button>
+          </> : <div className="review-empty"><CircleHelp size={24} /><strong>等待一次有依据的检查</strong><p>核对当前目标、有效约束，以及压缩后的执行是否仍然一致。</p>{assessment && <button className="evidence-link" onClick={() => setView('evidence')}>回顾上次评估依据<ArrowUpRight size={14} /></button>}</div>}
         </div>
-        {health.level === 'unknown' ? <div className="quiet-note"><CircleHelp size={16} /><p>{connectionError ? '接入器暂不可读，请检查本地配置。' : snapshot ? '已收到会话事件。等待可验证的上下文用量后，再给出容量建议。' : '还没有连接会话。你始终可以决定悬浮球关注哪一段工作。'}</p></div>
-          : <div className="quiet-note"><ShieldCheck size={16} /><p>容量提醒不代表会话混乱。<br />是否交接，由你决定。</p></div>}
+        {health.level === 'unknown' ? <div className="quiet-note"><Info size={16} /><p>{connectionError ? '本地评估暂不可读，请检查接入配置。' : '首版由你在目标 Codex 会话中发起评估；悬浮球读取本地结果。'}</p></div>
+          : <div className="quiet-note"><ShieldCheck size={16} /><p>{health.level === 'handoff' ? '先提取仍有效的信息，再继续下一步。' : '问题澄清后可以继续，压缩本身不触发换会话。'}<br /><span>结果反映本次评估，非实时质量保证。</span></p></div>}
         <div className="panel-actions">
-          <button className="primary-button" onClick={snapshot ? prepareHandoff : () => setView('sessions')}>
-            {snapshot ? '准备会话交接' : '选择会话'}<ArrowUpRight size={16} />
+          <button className="primary-button" onClick={health.level === 'unknown' ? () => setView('review') : prepareHandoff}>
+            {health.level === 'unknown' ? '准备语义评估' : '整理干净交接'}<ArrowUpRight size={16} />
           </button>
           <button className="secondary-button" disabled={!snapshot} onClick={snooze}><BellOff size={14} />稍后提醒</button>
         </div>
-        <footer className="panel-footer"><span><i />{isNative ? '本地处理' : '交互演示'}</span><button onClick={() => setView('settings')} aria-label="提醒设置"><Settings2 size={14} />设置</button></footer>
+        <footer className="panel-footer"><span><i />{health.reviewedAt ? `${isNative ? '评估于' : '演示评估'} ${new Date(health.reviewedAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}` : '等待本地评估'}</span><button onClick={() => setView('settings')} aria-label="提醒设置"><Settings2 size={14} />设置</button></footer>
       </>}
       {view === 'sessions' && <div className="subview">
         <h2>只关注，你选中的会话</h2><p className="subview-intro">手动固定一个会话。后台任务的更新不会自动切换它。</p>
         <div className="session-list">
           {sessions.map(item => <button className={`session-option ${pinnedId === item.id ? 'selected' : ''}`} key={item.id} title={item.id} aria-label={`${item.title} · ${item.id}`} onClick={() => pinSession(item.id)}>
-            <span className="session-avatar"><Layers size={17} /></span><span><strong>{item.title}</strong><small>{item.source === 'demo' ? '演示会话' : item.model ?? '收到本地事件'}</small></span>{pinnedId === item.id ? <Check size={17} /> : <ChevronRight size={15} />}
+            <span className="session-avatar"><Layers size={17} /></span><span><strong>{item.title}</strong><small>{item.source === 'demo' ? '演示会话' : item.assessment ? '已有手动语义评估' : '已收到生命周期事件'}</small></span>{pinnedId === item.id ? <Check size={17} /> : <ChevronRight size={15} />}
           </button>)}
-          {sessions.length === 0 && <div className="empty-state"><Layers size={28} /><strong>等待第一条会话事件</strong><p>开发预览需要先启用随仓库提供的 Codex Hooks 接入器。</p></div>}
+          {sessions.length === 0 && <div className="empty-state"><Layers size={28} /><strong>等待第一份评估</strong><p>启用仓库插件后，在目标 Codex 会话中请求 context-health 评估。</p><button className="text-button" onClick={() => setView('review')}>准备评估指令</button></div>}
         </div>
         {pinnedId && <button className="text-button" onClick={() => { setPinnedId(null); if (isNative) savePreference('orb:pinned', ''); setView('overview') }}>解除固定</button>}
         <p className="micro-note"><Info size={13} />自动跟随当前窗口仍在验证中。</p>
       </div>}
+      {view === 'evidence' && <div className="subview evidence-view">
+        <span className={`status-chip status-${health.level}`}><i />{health.label}</span>
+        <h2>{health.level === 'unknown' ? '上次评估，仅供回顾' : '为什么这样建议'}</h2><p className="subview-intro">{health.level === 'unknown' ? '这份报告不能代表当前执行状态。核对新的输入与进展后，再作决定。' : '逐项核对实际影响。已解决的问题与正常需求调整，不应继续触发提醒。'}</p>
+        {assessment && <p className="review-note">评估时间：{new Date(assessment.reviewed_at_ms).toLocaleString('zh-CN')}</p>}
+        <div className="review-goal"><small>当前目标</small><p>{assessment?.current_goal ?? '待确认'}</p></div>
+        <div className="evidence-list">{assessment?.signals.map(signal => <article className={`evidence-item ${signal.status === 'resolved' ? 'resolved' : ''}`} key={signal.id}>
+          <header><strong>{SIGNAL_LABELS[signal.kind]}</strong><span>{signal.status === 'resolved' ? '已澄清' : '待处理'}</span></header><p>{signal.summary}</p>
+          <div className="evidence-tags"><span>{signal.after_compaction ? '压缩后观察' : '较早记录'}</span><span>{signal.affects_next_step ? '影响下一步' : '暂不影响执行'}</span>{signal.recurrence === 'after_correction' && <span>纠正后复现</span>}</div>
+          <ol>{signal.evidence.map((item, index) => <li key={`${item.ref}-${index}`}><small>{item.ref}</small><p>{item.note}</p></li>)}</ol>
+        </article>)}</div>
+        {!assessment?.signals.length && <div className="clear-result evidence-clear"><ShieldCheck size={22} /><span>本次评估未发现仍影响执行的冲突。</span></div>}
+        <p className="review-note">{assessment?.review_note}</p>
+        {!isNative && health.actionable.length > 0 && <button className="secondary-button full-width" onClick={simulateClarification}>模拟澄清并复查<Check size={15} /></button>}
+        <button className="text-button review-again" onClick={() => setView('review')}>准备重新评估<ChevronRight size={14} /></button>
+      </div>}
+      {view === 'review' && <div className="subview handoff-view">
+        <span className="status-chip status-unknown"><i />由你发起</span><h2>检查这段思路</h2>
+        <p className="subview-intro">在目标 Codex 会话中发送这段指令。需要先启用仓库提供的 context-health 插件。</p>
+        <label className="sr-only" htmlFor="review-text">语义评估指令</label><textarea id="review-text" readOnly value={reviewPrompt} />
+        <button className="primary-button full-width" onClick={() => void copyText(reviewPrompt, '已复制。请在要检查的 Codex 会话中发送；评估尚未运行。')}><Copy size={15} />复制评估指令</button>
+        <p className="micro-note">评估结果会保存最小化的本地摘要与证据位置。悬浮球会读取结果；当前尚无自动后台评估。</p>
+      </div>}
       {view === 'handoff' && <div className="subview handoff-view">
-        <span className="status-chip status-healthy"><i />保留关键进展</span>
-        <h2>把思路，轻轻接过去</h2>
-        <p className="subview-intro">填写这份简短模板。保留目标、已验证结论和下一步，让新会话从清晰的起点开始。</p>
+        <span className="status-chip status-healthy"><i />只带走有效信息</span>
+        <h2>把思路，重新理清</h2>
+        <p className="subview-intro">保留当前目标、有效约束与已验证结论。先解决冲突，再把干净的下一步交给新会话。</p>
         <label className="sr-only" htmlFor="handoff-text">交接摘要模板</label>
         <textarea id="handoff-text" value={handoff} onChange={event => setHandoff(event.target.value)} spellCheck={false} />
-        <button className="primary-button full-width" onClick={() => void copyHandoff()}><Copy size={15} />复制交接模板</button>
+        <button className="primary-button full-width" onClick={() => void copyText(handoff, '已复制。核实有效信息后，粘贴到新会话。')}><Copy size={15} />复制交接模板</button>
         <p className="micro-note">复制后由你开启新会话；当前任务继续保留。</p>
       </div>}
       {view === 'settings' && <div className="subview">
         <h2>恰好够用的提醒</h2><p className="subview-intro">让信息可见，让注意力留在工作上。</p>
         <div className="setting-row"><div><strong>外观</strong><small>与你的工作环境协调</small></div><button className="theme-toggle" onClick={() => setTheme(theme === 'light' ? 'dark' : 'light')} aria-label="切换面板主题">{theme === 'light' ? <Moon size={17} /> : <Sun size={17} />}</button></div>
         <div className="setting-row"><div><strong>稍后提醒</strong><small>{snoozed ? '此会话已暂停 10 分钟' : '需要安静时，暂停 10 分钟'}</small></div><button className="text-button" disabled={!snapshot} onClick={() => { if (snoozed && pinnedId) { setSnoozedSessions(current => ({ ...current, [pinnedId]: 0 })); setToast('此会话提醒已恢复。') } else snooze() }}>{snoozed ? '恢复' : '暂停'}</button></div>
-        <div className="setting-row"><div><strong>容量阈值</strong><small>第一版采用保守固定阈值</small></div><span className="threshold-values">75% / 90%</span></div>
-        <div className="privacy-card"><LockKeyhole size={18} /><strong>你的会话，留在本机</strong><p>此版本不上传对话、不调用外部 AI。没有可靠数据时，显示未知。</p></div>
-        <p className="micro-note">系统通知与语义分析尚未接入。这里展示的是第一版交互框架。</p>
+        <div className="setting-row"><div><strong>提醒依据</strong><small>压缩后反复出现、仍影响执行的问题</small></div><button className="text-button" onClick={() => setView('review')}>复查</button></div>
+        <div className="privacy-card"><LockKeyhole size={18} /><strong>保留依据，减少冗余</strong><p>悬浮球不上传对话。手动评估只保存必要的本地摘要与证据位置，未知信息继续标为未知。</p></div>
+        <p className="micro-note">自动后台评估与系统通知待接入。当前展示有时效的手动评估结果，规则准确率尚未在真实任务中校准。</p>
       </div>}
     </section>}
     <div className="orb-bottom-row">
@@ -256,7 +298,7 @@ export default function App() {
       >
         <svg className="orb-ring" viewBox="0 0 80 80" aria-hidden="true">
           <circle className="orb-ring-base" cx="40" cy="40" r="36" />
-          <circle className="orb-ring-fill" cx="40" cy="40" r="36" strokeDasharray={`${((health.percent ?? 0) / 100) * 226.2} 226.2`} />
+          <circle className="orb-ring-fill" cx="40" cy="40" r="36" strokeDasharray={health.level === 'unknown' ? '4 14' : '62 13.4'} />
         </svg>
         <span className="orb-core">{snoozed ? <BellOff size={22} /> : <OrbMark />}</span>
         <span className="orb-status-dot" />
@@ -273,17 +315,17 @@ export default function App() {
     </header>
     <main className="studio-main">
       <section className="intro">
-        <div className="eyebrow"><span />A LITTLE SPACE TO THINK</div>
-        <h1>专注，<br />留一点<span className="serif-word">余量。</span></h1>
-        <p className="intro-copy">一个安静的悬浮球，陪你留意上下文。<br />该继续时不打扰，该交接时轻轻提醒。</p>
-        <div className="platform-row"><span><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M13.4 3.7c.8-1 1-2 .9-2.7-1 .1-2.1.6-2.8 1.5-.7.8-1 1.9-.9 2.7 1 .1 2-.5 2.8-1.5ZM16.9 14.2c-.4.9-.6 1.3-1.1 2.1-.7 1-1.6 2.4-2.8 2.4-1.1 0-1.4-.7-2.9-.7s-1.8.7-2.9.7c-1.2 0-2-1.2-2.7-2.2C2.5 13.6 2 9.7 3.3 7.7c.9-1.4 2.3-2.1 3.6-2.1 1.2 0 2 .7 3 .7s1.6-.7 3-.7c1.1 0 2.4.6 3.3 1.7-2.9 1.6-2.4 5.6.7 6.9Z" fill="currentColor"/></svg>macOS</span><span><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m2 4 7-1v6H2V4Zm8-1.2L18 2v7h-8V2.8ZM2 10h7v6l-7-1v-5Zm8 0h8v7l-8-1v-6Z" fill="currentColor"/></svg>Windows</span><span className="platform-stage">框架 v0.1</span></div>
+        <div className="eyebrow"><span />WHEN CONTEXT LOSES THE THREAD</div>
+        <h1>专注，<br />让思路<span className="serif-word">清楚。</span></h1>
+        <p className="intro-copy">多次压缩之后，思路还清楚吗？<br />当旧信息开始干扰下一步，轻轻提醒你。</p>
+        <div className="platform-row"><span><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M13.4 3.7c.8-1 1-2 .9-2.7-1 .1-2.1.6-2.8 1.5-.7.8-1 1.9-.9 2.7 1 .1 2-.5 2.8-1.5ZM16.9 14.2c-.4.9-.6 1.3-1.1 2.1-.7 1-1.6 2.4-2.8 2.4-1.1 0-1.4-.7-2.9-.7s-1.8.7-2.9.7c-1.2 0-2-1.2-2.7-2.2C2.5 13.6 2 9.7 3.3 7.7c.9-1.4 2.3-2.1 3.6-2.1 1.2 0 2 .7 3 .7s1.6-.7 3-.7c1.1 0 2.4.6 3.3 1.7-2.9 1.6-2.4 5.6.7 6.9Z" fill="currentColor"/></svg>macOS</span><span><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m2 4 7-1v6H2V4Zm8-1.2L18 2v7h-8V2.8ZM2 10h7v6l-7-1v-5Zm8 0h8v7l-8-1v-6Z" fill="currentColor"/></svg>Windows</span><span className="platform-stage">框架 v0.2</span></div>
         <div className="scenario-controls">
           <div className="section-label"><span>试试四种状态</span><span>01 — 04</span></div>
           <div className="scenario-grid" role="group" aria-label="演示状态">
             {(Object.keys(scenarioLabels) as HealthLevel[]).map((level, index) => <button key={level} className={`scenario-button level-${level} ${scenario === level ? 'active' : ''}`} aria-pressed={scenario === level} onClick={() => chooseScenario(level)}><span className="scenario-indicator" /><span>{scenarioLabels[level]}</span><small>0{index + 1}</small></button>)}
           </div>
         </div>
-        <div className="design-principle"><span className="principle-line" /><p>轻提醒，强掌控。<br /><span>把决定权留给你。</span></p></div>
+        <div className="design-principle"><span className="principle-line" /><p>留下有效信息，让下一步清楚。<br /><span>根据执行证据，决定交接时机。</span></p></div>
       </section>
       <section className="workspace-stage" ref={stageRef} aria-label="悬浮球交互预览">
         <div className="stage-caption"><span className="stage-live-dot" />你的工作空间<span>示意场景 · 非真实会话</span></div>
@@ -307,6 +349,6 @@ export default function App() {
         if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus() }
         else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus() }
       }
-    }}><button className="icon-button modal-close" onClick={() => setHelp(false)} aria-label="关闭设计说明"><X size={18} /></button><OrbMark /><h2 id="help-title">小一点，清楚一点。</h2><p>这是可以操作的设计预览，所有用量均为模拟数据。点击状态按钮体验变化，拖动悬浮球，或展开交接模板。</p><ul><li><strong>不猜当前会话：</strong>第一版使用明确的手动固定。</li><li><strong>不伪造健康分：</strong>容量压力与内容杂乱分开处理。</li><li><strong>不替你做决定：</strong>提醒可以推迟，新会话由你开启。</li></ul><button className="primary-button full-width" onClick={() => setHelp(false)}>开始体验<ChevronRight size={16} /></button></section></div>}
+    }}><button className="icon-button modal-close" onClick={() => setHelp(false)} aria-label="关闭设计说明"><X size={18} /></button><OrbMark /><h2 id="help-title">让下一步，重新清楚。</h2><p>这里演示多次压缩后的语义完整性检查。所有会话与证据均为虚构，可查看原因、模拟澄清并准备干净交接。</p><ul><li><strong>先看实际影响：</strong>旧指令、遗漏约束与冲突事实是否仍在干扰执行。</li><li><strong>再看能否恢复：</strong>单次偏差先澄清，纠正后仍反复出现才提高提醒。</li><li><strong>保留选择权：</strong>长会话可以继续，建议可以推迟，新会话由你开启。</li></ul><button className="primary-button full-width" onClick={() => setHelp(false)}>开始体验<ChevronRight size={16} /></button></section></div>}
   </div>
 }

@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "source": "codex-skill-review",
+  "session_id": "synthetic-assessment-session",
+  "turn_id": "synthetic-turn-4",
+  "reviewed_at_ms": 1788652800000,
+  "compactions_observed": 3,
+  "coverage": "sufficient",
+  "current_goal": "完成示例项目筛选面板的键盘操作",
+  "next_step": "保留已确认的无鼠标操作约束，再实现清除筛选动作",
+  "review_note": "纯虚构的跨语言测试报告。\n不来自真实会话，也不代表当前执行状态。",
+  "signals": [
+    {
+      "id": "synthetic-constraint-1",
+      "kind": "constraint_loss",
+      "summary": "压缩后的方案遗漏了之前确认的键盘操作要求",
+      "status": "open",
+      "after_compaction": true,
+      "affects_next_step": true,
+      "recurrence": "after_correction",
+      "confidence": "high",
+      "evidence": [
+        {
+          "ref": "synthetic:turn-2",
+          "note": "虚构约束：所有筛选操作都能通过键盘完成。"
+        },
+        {
+          "ref": "synthetic:turn-4",
+          "note": "虚构方案：清除按钮只有鼠标悬停时可见，仍未处理已指出的约束。"
+        }
+      ]
+    }
+  ]
+}

@@ -2,15 +2,51 @@ import { expect, test } from '@playwright/test'
 
 test.beforeEach(async ({ page }) => { await page.goto('/') })
 
-test('all states are explainable and unknown has no percent', async ({ page }) => {
+test('semantic states use evidence rather than capacity or compaction alone', async ({ page }) => {
   const panel = page.getByTestId('orb-panel')
-  for (const [name, percent] of [['余量充足', '42%'], ['建议交接', '94%'], ['留意余量', '82%']]) {
+  for (const [name, label] of [['压缩后清晰', '脉络清晰'], ['建议新开', '建议新开'], ['局部混杂', '需要留意']]) {
     await page.getByRole('group', { name: '演示状态' }).getByRole('button', { name }).click()
-    await expect(panel.locator('.capacity-value')).toContainText(percent)
+    await expect(panel.locator('.status-chip')).toHaveText(label)
+    await expect(panel.getByTestId('semantic-card')).not.toContainText('%')
   }
-  await page.getByRole('button', { name: '数据未知' }).click()
-  await expect(panel.locator('.capacity-value')).not.toContainText('%')
-  await expect(panel).toContainText('等待数据')
+  await page.getByRole('button', { name: '压缩后清晰' }).click()
+  await expect(panel.locator('.semantic-facts')).toContainText('8 次')
+  await expect(panel.locator('.semantic-facts')).toContainText('0 项')
+  await page.getByRole('button', { name: '证据不足' }).click()
+  await expect(panel).toContainText('等待评估')
+  await expect(panel.locator('.semantic-facts')).toHaveCount(0)
+})
+
+test('evidence is inspectable and resolved problems stop the recommendation', async ({ page }) => {
+  await page.getByRole('button', { name: '查看评估依据' }).click()
+  await expect(page.locator('.evidence-item')).toHaveCount(2)
+  await expect(page.locator('.evidence-item').first()).toContainText('纠正后复现')
+  await expect(page.locator('.evidence-item li').first()).toContainText('演示')
+  await page.getByRole('button', { name: '模拟澄清并复查' }).click()
+  await expect(page.getByTestId('orb-panel').locator('.status-chip')).toHaveText('脉络清晰')
+  await expect(page.locator('.semantic-facts')).toContainText('4 次')
+  await expect(page.locator('.semantic-facts')).toContainText('0 项')
+})
+
+test('copying a review prompt does not claim a review has run', async ({ page, context }) => {
+  await context.grantPermissions(['clipboard-read', 'clipboard-write'])
+  await page.getByRole('button', { name: '证据不足' }).click()
+  await page.getByRole('button', { name: '准备语义评估' }).click()
+  await expect(page.getByRole('textbox', { name: '语义评估指令' })).toContainText('$context-health')
+  await page.getByRole('button', { name: '复制评估指令' }).click()
+  await expect(page.getByRole('status')).toContainText('评估尚未运行')
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toContain('$context-health')
+})
+
+test('expired advice is retained only as historical evidence', async ({ page }) => {
+  await page.clock.install()
+  await page.reload()
+  await page.clock.fastForward(21 * 60 * 1000)
+  await expect(page.getByTestId('orb-panel').locator('.status-chip')).toHaveText('等待评估')
+  await expect(page.getByRole('button', { name: '整理干净交接' })).toHaveCount(0)
+  await page.getByRole('button', { name: '回顾上次评估依据' }).click()
+  await expect(page.getByRole('heading', { name: '上次评估，仅供回顾' })).toBeVisible()
+  await expect(page.getByTestId('orb-panel')).toContainText('不能代表当前执行状态')
 })
 
 test('pinning and snooze stay isolated across background events and session switches', async ({ page }) => {
@@ -36,7 +72,7 @@ test('pinning and snooze stay isolated across background events and session swit
 
 test('handoff is editable and copies exactly the reviewed template', async ({ page, context }) => {
   await context.grantPermissions(['clipboard-read', 'clipboard-write'])
-  await page.getByRole('button', { name: '准备会话交接' }).click()
+  await page.getByRole('button', { name: '整理干净交接' }).click()
   const text = page.getByRole('textbox', { name: '交接摘要模板' })
   await expect(text).toContainText('待填写的交接模板')
   await text.fill('目标：完成设置页\n已验证：键盘导航\n下一步：检查错误反馈')
@@ -76,6 +112,6 @@ test('narrow layout and theme changes retain usable controls', async ({ page }) 
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark')
   await page.getByRole('button', { name: '切换主题', exact: true }).click()
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'light')
-  await page.getByRole('button', { name: '准备会话交接' }).click()
+  await page.getByRole('button', { name: '整理干净交接' }).click()
   await expect(page.getByRole('textbox', { name: '交接摘要模板' })).toBeVisible()
 })

@@ -1,8 +1,8 @@
-import type { ContextSnapshot } from './context'
+import type { ContextSnapshot, SemanticAssessment } from './context'
 
-export const isNative = '__TAURI_INTERNALS__' in window
+export const isNative = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
 
-interface HookSnapshot {
+export interface HookSnapshot {
   schema_version: number
   source: 'codex-hook'
   session_id: string
@@ -15,21 +15,49 @@ interface HookSnapshot {
   binding: 'unbound'
 }
 
-export async function readHookSessions(): Promise<ContextSnapshot[]> {
+function sessionTitle(id: string) {
+  return `会话 · ${id.length > 18 ? `${id.slice(0, 8)}…${id.slice(-6)}` : id}`
+}
+
+export function mergeLocalSessions(events: HookSnapshot[], reviews: SemanticAssessment[]): ContextSnapshot[] {
+  const merged = new Map<string, ContextSnapshot>()
+  for (const event of events) {
+    const existing = merged.get(event.session_id)
+    // Inventory and exact reads may finish in either order. Keep the newer observation.
+    if (existing && existing.observedAt >= event.observed_at_ms) continue
+    merged.set(event.session_id, {
+      id: event.session_id, title: sessionTitle(event.session_id), source: 'codex-hook',
+      model: event.model, observedAt: event.observed_at_ms, turnId: event.turn_id,
+      usedTokens: null, windowTokens: null, compactions: null,
+      lastEvent: event.last_event_name, assessment: null,
+    })
+  }
+  for (const review of reviews) {
+    const existing = merged.get(review.session_id)
+    if (existing?.assessment && existing.assessment.reviewed_at_ms > review.reviewed_at_ms) continue
+    const hasHook = existing?.lastEvent !== undefined
+    merged.set(review.session_id, {
+      id: review.session_id, title: sessionTitle(review.session_id), source: 'codex-skill-review',
+      model: existing?.model ?? null, observedAt: hasHook ? existing.observedAt : review.reviewed_at_ms,
+      // A report's claimed turn is not an independent observation of the active turn.
+      turnId: hasHook ? existing.turnId : null,
+      usedTokens: null, windowTokens: null, compactions: review.compactions_observed,
+      lastEvent: existing?.lastEvent, assessment: review,
+    })
+  }
+  return [...merged.values()].sort((a, b) => b.observedAt - a.observedAt)
+}
+
+export async function readLocalSessions(pinnedId: string | null): Promise<ContextSnapshot[]> {
   if (!isNative) return []
   const { invoke } = await import('@tauri-apps/api/core')
-  const data = await invoke<HookSnapshot[]>('read_hook_events')
-  return data.map(event => ({
-    id: event.session_id,
-    title: `会话 · ${event.session_id.length > 18 ? `${event.session_id.slice(0, 8)}…${event.session_id.slice(-6)}` : event.session_id}`,
-    source: 'codex-hook',
-    model: event.model,
-    observedAt: event.observed_at_ms,
-    usedTokens: null,
-    windowTokens: null,
-    compactions: null,
-    lastEvent: event.last_event_name,
-  }))
+  const [events, reviews, pinnedEvents, pinnedReviews] = await Promise.all([
+    invoke<HookSnapshot[]>('read_hook_events', { sessionId: null }),
+    invoke<SemanticAssessment[]>('read_semantic_assessments', { sessionId: null }),
+    pinnedId ? invoke<HookSnapshot[]>('read_hook_events', { sessionId: pinnedId }) : [],
+    pinnedId ? invoke<SemanticAssessment[]>('read_semantic_assessments', { sessionId: pinnedId }) : [],
+  ])
+  return mergeLocalSessions([...events, ...pinnedEvents], [...reviews, ...pinnedReviews])
 }
 
 export async function sizeOrbWindow(expanded: boolean) {
@@ -42,7 +70,7 @@ export async function sizeOrbWindow(expanded: boolean) {
     nativeWindow.scaleFactor(), currentMonitor(),
   ])
   const width = expanded ? 382 : 92
-  const height = expanded ? 628 : 92
+  const height = expanded ? 690 : 92
   const nextWidth = Math.round(width * scale)
   const nextHeight = Math.round(height * scale)
   const area = monitor?.workArea

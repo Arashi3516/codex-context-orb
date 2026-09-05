@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import emit_hook_event as emitter
 import inspect_events as reader
@@ -95,6 +96,32 @@ class HookAdapterTests(unittest.TestCase):
         report = reader.inspect(self.root, "thr-alpha")
         self.assertEqual([event["session_id"] for event in report["events"]], ["thr-alpha"])
         self.assertEqual(report["binding"], "unbound")
+
+    def test_windows_transient_replace_retries_without_partial_output(self):
+        error = PermissionError("synthetic Windows sharing failure")
+        error.winerror = 5
+        original_replace = os.replace
+        attempts = 0
+        def replace(source, destination):
+            nonlocal attempts
+            attempts += 1
+            if attempts < 3:
+                raise error
+            return original_replace(source, destination)
+        with patch.object(emitter.os, "replace", side_effect=replace), patch.object(emitter.time, "sleep"):
+            path = emitter.write_snapshot(emitter.project_event(self.payload, 100), self.root)
+        self.assertEqual(attempts, 3)
+        self.assertTrue(emitter.valid_snapshot(json.loads(path.read_text())))
+
+    def test_replace_retry_is_bounded_and_cleans_temporary_files(self):
+        for windows_error, expected_attempts in ((32, 5), (None, 1)):
+            error = PermissionError("synthetic failure")
+            error.winerror = windows_error
+            with patch.object(emitter.os, "replace", side_effect=error) as replace, patch.object(emitter.time, "sleep"):
+                with self.assertRaises(PermissionError):
+                    emitter.write_snapshot(emitter.project_event(self.payload, 100), self.root)
+            self.assertEqual(replace.call_count, expected_attempts)
+            self.assertEqual(list((self.root / "events").iterdir()), [])
 
     def test_reader_rejects_wrong_filename_oversize_and_extra_fields(self):
         path = emitter.write_snapshot(emitter.project_event(self.payload, 100), self.root)

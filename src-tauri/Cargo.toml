@@ -1,6 +1,6 @@
 [package]
 name = "codex-context-orb"
-version = "0.1.0"
+version = "0.2.0"
 description = "An independent local context companion for Codex"
 authors = ["Codex Context Orb contributors"]
 edition = "2021"
