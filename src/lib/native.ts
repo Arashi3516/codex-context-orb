@@ -1,5 +1,6 @@
 import type { ContextSnapshot, SemanticAssessment } from './context'
 import type { EvidenceReport } from './evidence'
+import type { MagnetPreferences, MagnetState } from './magnet'
 
 export const isNative = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
 
@@ -83,26 +84,15 @@ export async function readEvidenceHistory(sessionId: string): Promise<EvidenceRe
 
 export async function sizeOrbWindow(expanded: boolean) {
   if (!isNative) return
-  const { getCurrentWindow, currentMonitor } = await import('@tauri-apps/api/window')
-  const { LogicalSize, PhysicalPosition } = await import('@tauri-apps/api/dpi')
-  const nativeWindow = getCurrentWindow()
-  const [position, size, scale, monitor] = await Promise.all([
-    nativeWindow.outerPosition(), nativeWindow.outerSize(),
-    nativeWindow.scaleFactor(), currentMonitor(),
-  ])
-  const width = expanded ? 382 : 92
-  const height = expanded ? 690 : 92
-  const nextWidth = Math.round(width * scale)
-  const nextHeight = Math.round(height * scale)
-  const area = monitor?.workArea
-  const x = Math.max(area?.position.x ?? 0, position.x + size.width - nextWidth)
-  const y = Math.max(area?.position.y ?? 0, position.y + size.height - nextHeight)
-  await nativeWindow.setSize(new LogicalSize(width, height))
-  await nativeWindow.setPosition(new PhysicalPosition(x, y))
+  return magnetCommand('resize_orb_window', { width: expanded ? 382 : 92, height: expanded ? 690 : 92 })
 }
 
-export async function dragNativeWindow() {
-  if (!isNative) return
-  const { getCurrentWindow } = await import('@tauri-apps/api/window')
-  await getCurrentWindow().startDragging()
+async function magnetCommand(command: string, args?: Record<string, unknown>): Promise<MagnetState> {
+  const { invoke } = await import('@tauri-apps/api/core')
+  return invoke<MagnetState>(command, args)
 }
+
+export const getNativeMagnetState = () => magnetCommand('get_magnet_state')
+export const setNativeMagnetPreferences = (preferences: MagnetPreferences) => magnetCommand('set_magnet_preferences', { preferences })
+export const beginNativeMagneticDrag = (anchorX: number, anchorY: number) => magnetCommand('begin_magnetic_drag', { anchorX, anchorY })
+export const endNativeMagneticDrag = (release?: { anchorX: number; anchorY: number; moved: boolean }) => magnetCommand('end_magnetic_drag', release)

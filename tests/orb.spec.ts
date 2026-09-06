@@ -4,9 +4,9 @@ test.beforeEach(async ({ page }) => { await page.goto('/') })
 
 test('listed file checks define the result without a compaction or restart gate', async ({ page }) => {
   const panel = page.getByTestId('orb-panel')
-  for (const [name, label] of [['所列检查通过', '所列检查通过'], ['发现约束偏差', '检查未通过'], ['关键证据缺失', '证据待补齐']]) {
+  for (const [name, label] of [['所列检查通过', '所列依据一致'], ['发现约束偏差', '发现检查偏差'], ['关键证据缺失', '证据待补齐']]) {
     await page.getByRole('group', { name: '演示状态' }).getByRole('button', { name }).click()
-    await expect(panel.locator('.status-chip')).toHaveText(label)
+    await expect(panel.locator('.risk-value h2')).toHaveText(label)
     await expect(panel.getByTestId('semantic-card')).not.toContainText('%')
     await expect(panel).toContainText('新开收益尚未评估')
     await expect(panel).not.toContainText('建议新开')
@@ -26,8 +26,8 @@ test('actual checks, declarations and file hashes stay distinguishable', async (
   await expect(page.locator('.source-item').last()).toContainText('SHA-256')
   await expect(page.getByTestId('orb-panel')).toContainText('尚非独立验证')
   await page.getByRole('button', { name: '模拟修改并重新采集' }).click()
-  await expect(page.getByTestId('orb-panel').locator('.status-chip')).toHaveText('所列检查通过')
-  await expect(page.locator('.semantic-facts')).toContainText('0 项')
+  await expect(page.getByTestId('orb-panel').locator('.risk-value h2')).toHaveText('所列依据一致')
+  await expect(page.locator('.check-tally')).toContainText('0 偏差')
 })
 
 test('superseded requirements remain visible without entering the active checklist', async ({ page }) => {
@@ -35,7 +35,7 @@ test('superseded requirements remain visible without entering the active checkli
   await expect(page.locator('.ledger-superseded')).toContainText('切换为自动保存')
   await expect(page.locator('.ledger-active').filter({ hasText: '保存方式保持 manual' })).toContainText('替代：旧方案')
   await page.getByRole('button', { name: '返回概览' }).click()
-  await expect(page.getByTestId('orb-panel').locator('.status-chip')).toHaveText('所列检查通过')
+  await expect(page.getByTestId('orb-panel').locator('.risk-value h2')).toHaveText('所列依据一致')
   await page.getByRole('button', { name: '查看检查与来源' }).click()
   await expect(page.locator('.evidence-item')).toHaveCount(2)
 })
@@ -55,7 +55,7 @@ test('elapsed time does not erase an as-of receipt and historical views cannot r
   await page.clock.install()
   await page.reload()
   await page.clock.fastForward(21 * 60 * 1000)
-  await expect(page.getByTestId('orb-panel').locator('.status-chip')).toHaveText('检查未通过')
+  await expect(page.getByTestId('orb-panel').locator('.risk-value h2')).toHaveText('发现检查偏差')
   await page.getByRole('button', { name: '查看检查与来源' }).click()
   await expect(page.getByTestId('orb-panel')).toContainText('截至采集时点')
   await page.getByRole('button', { name: '查看采集历史' }).click()
@@ -64,7 +64,7 @@ test('elapsed time does not erase an as-of receipt and historical views cannot r
   await expect(page.getByTestId('orb-panel')).toContainText('历史收据')
   await expect(page.locator('.probe-pass')).toHaveCount(2)
   await page.getByRole('button', { name: '返回概览' }).click()
-  await expect(page.getByTestId('orb-panel').locator('.status-chip')).toHaveText('检查未通过')
+  await expect(page.getByTestId('orb-panel').locator('.risk-value h2')).toHaveText('发现检查偏差')
 })
 
 test('pinning and snooze stay isolated across background events and session switches', async ({ page }) => {
@@ -134,6 +134,44 @@ test('narrow layout and theme changes retain usable controls', async ({ page }) 
   await expect(page.getByRole('textbox', { name: '下一步任务简报' })).toBeVisible()
 })
 
+test('release always docks the orb and opening the panel preserves its position', async ({ page }) => {
+  const orb = page.locator('.orb-button')
+  const stage = (await page.getByRole('region', { name: '悬浮球交互预览' }).boundingBox())!
+  await page.getByRole('button', { name: '提醒设置' }).click()
+  await page.getByRole('radio', { name: '关闭', exact: true }).check()
+  await page.getByRole('button', { name: '返回概览' }).click()
+  let box = (await orb.boundingBox())!
+  await page.mouse.move(box.x + 40, box.y + 40)
+  await page.mouse.down()
+  await page.mouse.move(stage.x + stage.width / 2, stage.y + stage.height * .85, { steps: 8 })
+  await page.mouse.up()
+  box = (await orb.boundingBox())!
+  expect(Math.abs(box.y + box.height - (stage.y + stage.height - 6))).toBeLessThan(2)
+  const docked = box
+  await orb.click()
+  await expect(page.getByTestId('orb-panel')).toHaveCount(0)
+  await orb.click()
+  box = (await orb.boundingBox())!
+  expect(box.x).toBeCloseTo(docked.x, 0)
+  expect(box.y).toBeCloseTo(docked.y, 0)
+  await page.getByRole('button', { name: '提醒设置' }).click()
+  await page.getByRole('radio', { name: '仅限 Codex 窗口' }).check()
+  await page.getByRole('button', { name: '返回概览' }).click()
+  const target = (await page.locator('.mock-window').boundingBox())!
+  await page.mouse.move(box.x + 40, box.y + 40)
+  await page.mouse.down()
+  await page.mouse.move(target.x + target.width / 2, target.y + 20, { steps: 8 })
+  await page.mouse.up()
+  box = (await orb.boundingBox())!
+  expect(Math.abs(box.y + box.height - target.y)).toBeLessThan(2)
+  await expect(page.locator('#orb-state-description')).toContainText('已吸附窗口边缘')
+  const panel = (await page.getByTestId('orb-panel').boundingBox())!
+  expect(panel.x).toBeGreaterThanOrEqual(stage.x)
+  expect(panel.y).toBeGreaterThanOrEqual(stage.y)
+  expect(panel.x + panel.width).toBeLessThanOrEqual(stage.x + stage.width)
+  expect(panel.y + panel.height).toBeLessThanOrEqual(stage.y + stage.height)
+})
+
 test('compact widget keeps every detail reachable without horizontal overflow', async ({ page }) => {
   await page.setViewportSize({ width: 382, height: 690 })
   await page.goto('/?surface=orb')
@@ -145,4 +183,29 @@ test('compact widget keeps every detail reachable without horizontal overflow', 
   await page.getByRole('button', { name: '返回概览' }).click()
   await page.getByRole('button', { name: '整理下一步简报' }).click()
   await expect(page.getByRole('textbox', { name: '下一步任务简报' })).toBeVisible()
+})
+
+test('risk color, capacity ring and optional count remain distinct and settings persist', async ({ page }) => {
+  await page.getByRole('button', { name: '所列检查通过' }).click()
+  await expect(page.locator('.orb-dock')).toHaveClass(/risk-aligned/)
+  await expect(page.getByRole('progressbar', { name: '上下文使用量' })).toHaveAttribute('aria-valuenow', '98')
+  await expect(page.locator('.orb-ring-fill')).toHaveAttribute('stroke-dashoffset', '2')
+  await expect(page.getByTestId('compaction-readout')).toHaveCount(0)
+  await page.getByRole('button', { name: '提醒设置' }).click()
+  await expect(page.getByRole('radio')).toHaveCount(3)
+  await expect(page.getByRole('radio', { name: '仅限 Codex 窗口' })).toBeChecked()
+  await expect(page.getByRole('button', { name: /绑定 CLI/ })).toHaveCount(0)
+  await page.getByRole('radio', { name: '关闭', exact: true }).check()
+  await expect(page.getByTestId('orb-panel')).toContainText('每次松手，都停靠当前屏幕最近的边缘')
+  await page.getByRole('switch', { name: '球体动态配色' }).click()
+  await expect(page.locator('.orb-dock')).toHaveClass(/risk-neutral/)
+  await page.getByRole('switch', { name: '显示压缩次数' }).click()
+  await page.getByRole('button', { name: '返回概览' }).click()
+  await expect(page.getByTestId('compaction-readout')).toContainText('8')
+  await expect(page.locator('.risk-value h2')).toHaveText('所列依据一致')
+  await page.reload()
+  await expect(page.getByTestId('compaction-readout')).toBeVisible()
+  await page.getByRole('button', { name: '提醒设置' }).click()
+  await expect(page.getByRole('radio', { name: '关闭', exact: true })).toBeChecked()
+  await expect(page.getByRole('switch', { name: '球体动态配色' })).not.toBeChecked()
 })

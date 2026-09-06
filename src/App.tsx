@@ -3,13 +3,16 @@ import type { CSSProperties, PointerEvent } from 'react'
 import {
   ArrowDownLeft, ArrowLeft, ArrowUpRight, BellOff, Check, ChevronDown,
   ChevronRight, CircleHelp, Copy, ExternalLink, Folder, Github, Info, Layers,
-  LockKeyhole, Moon, MoreHorizontal, Pin, Plus, Settings2, ShieldCheck, Sun, X,
+  LockKeyhole, Magnet, Moon, MoreHorizontal, Pin, Plus, Settings2, ShieldCheck, Sun, X,
 } from 'lucide-react'
 import { createHandoffTemplate, createReviewPrompt, describeProbe, evaluateContext, resolvePinned, SIGNAL_LABELS } from './lib/context'
 import type { ContextSnapshot } from './lib/context'
 import { ITEM_LABELS, RESULT_LABELS, RULE_LABELS, isEvidenceReport, type EvidenceReport } from './lib/evidence'
 import { demoReport, demoSessions, DEMO_PRIMARY_ID, type DemoScenario } from './lib/demo'
-import { dragNativeWindow, isNative, readEvidenceHistory, readLocalSessions, sizeOrbWindow } from './lib/native'
+import { beginNativeMagneticDrag, endNativeMagneticDrag, getNativeMagnetState, isNative, readEvidenceHistory, readLocalSessions, setNativeMagnetPreferences, sizeOrbWindow } from './lib/native'
+import { DEFAULT_MAGNET, WINDOW_MODE_LABELS, dockPreview, parseMagnetPreferences, type MagnetPreferences, type MagnetState, type Rect, type WindowMagnetMode } from './lib/magnet'
+import { presentCapacity, presentCompactions, presentRisk } from './lib/presentation'
+import ContextReadout from './ContextReadout'
 
 type PanelView = 'overview' | 'sessions' | 'handoff' | 'settings' | 'evidence' | 'review' | 'ledger' | 'history'
 const widgetSurface = isNative || new URLSearchParams(location.search).get('surface') === 'orb'
@@ -49,15 +52,35 @@ export default function App() {
   const [historyLoading, setHistoryLoading] = useState(false)
   const [historicalReport, setHistoricalReport] = useState<EvidenceReport | null>(null)
   const [offset, setOffset] = useState({ x: 0, y: 0 })
+  const [dynamicColor, setDynamicColor] = useState(() => readPreference('orb:dynamic-color', 'true') !== 'false')
+  const [showCompactions, setShowCompactions] = useState(() => readPreference('orb:show-compactions', 'false') === 'true')
+  const [magnetPreferences, setMagnetPreferences] = useState(() => parseMagnetPreferences(readPreference('orb:magnet', JSON.stringify(DEFAULT_MAGNET))))
+  const [magnetState, setMagnetState] = useState<MagnetState | null>(null)
+  const [magnetSaving, setMagnetSaving] = useState(false)
+  const [magnetInitialized, setMagnetInitialized] = useState(!isNative)
+  const magnetWriteBusy = useRef(isNative)
+  const magnetInitialization = useRef<Promise<MagnetState> | null>(null)
+  const nativeGestureBusy = useRef(false)
+  const [previewSnap, setPreviewSnap] = useState<'screen' | 'window' | null>(null)
+  const [previewLayout, setPreviewLayout] = useState<{ left: boolean; top: boolean; width: number; height: number } | null>(null)
+  const [dragging, setDragging] = useState(false)
   const orbRef = useRef<HTMLButtonElement>(null)
+  const dockRef = useRef<HTMLDivElement>(null)
   const panelRef = useRef<HTMLElement>(null)
   const stageRef = useRef<HTMLElement>(null)
   const helpRef = useRef<HTMLElement>(null)
   const helpTriggerRef = useRef<HTMLButtonElement>(null)
-  const pointer = useRef<{ x: number; y: number; originX: number; originY: number; moved: boolean; dragging: boolean } | null>(null)
+  const pointer = useRef<{ x: number; y: number; moved: boolean; rect: Rect; nativeStart?: Promise<MagnetState> } | null>(null)
   const resizeQueue = useRef(Promise.resolve())
   const snapshot = resolvePinned(sessions, pinnedId)
   const health = evaluateContext(snapshot, now)
+  const risk = presentRisk(snapshot, now)
+  const capacity = presentCapacity(snapshot, now)
+  const compactions = presentCompactions(snapshot)
+  const snapped = isNative ? magnetState?.snappedX ?? magnetState?.snappedY : previewSnap
+  const dockLeft = isNative ? magnetState?.layoutAnchorLeft : previewLayout?.left
+  const dockTop = isNative ? magnetState?.layoutAnchorTop : previewLayout?.top
+  const magnetControlsDisabled = isNative && (!magnetInitialized || magnetSaving)
   const assessment = snapshot?.assessment
   const report = health.report
   const displayedReport = historicalReport?.session_id === pinnedId ? historicalReport : report
@@ -110,10 +133,44 @@ export default function App() {
   }, [view, pinnedId, report])
   useEffect(() => {
     if (!isNative) return
-    resizeQueue.current = resizeQueue.current.then(() => sizeOrbWindow(expanded)).catch(() => {
+    resizeQueue.current = resizeQueue.current.then(async () => {
+      const state = await sizeOrbWindow(expanded)
+      if (state) setMagnetState(state)
+    }).catch(() => {
       setToast('窗口尺寸调整失败，可拖动悬浮球重新定位。')
     })
   }, [expanded])
+  useEffect(() => {
+    if (!isNative) return
+    let cancelled = false, pending = false
+    let lastRead = 0
+    const refresh = async () => {
+      if (pending || Date.now() - lastRead < (pointer.current || expanded ? 120 : 800)) return
+      pending = true; lastRead = Date.now()
+      try { const state = await getNativeMagnetState(); if (!cancelled) setMagnetState(state) } catch { /* surfaced when the user requests window actions */ }
+      finally { pending = false }
+    }
+    void refresh()
+    const timer = window.setInterval(() => void refresh(), 120)
+    return () => { cancelled = true; window.clearInterval(timer) }
+  }, [expanded])
+  useEffect(() => {
+    if (!isNative) return
+    let cancelled = false
+    magnetInitialization.current ??= setNativeMagnetPreferences(magnetPreferences).catch(async () => {
+      setToast('保存的磁吸设置未应用，已重新读取当前设置。')
+      return getNativeMagnetState()
+    })
+    void magnetInitialization.current.then(state => {
+      if (cancelled) return
+      setMagnetState(state); setMagnetPreferences(state.preferences); setMagnetInitialized(true)
+      magnetWriteBusy.current = false
+    }).catch(() => { if (!cancelled) setToast('磁吸控制暂不可用，请确认原生应用已更新后重新打开。') })
+    return () => { cancelled = true }
+  }, [])
+  useEffect(() => { savePreference('orb:dynamic-color', String(dynamicColor)) }, [dynamicColor])
+  useEffect(() => { savePreference('orb:show-compactions', String(showCompactions)) }, [showCompactions])
+  useEffect(() => { savePreference('orb:magnet', JSON.stringify(magnetPreferences)); setPreviewSnap(null) }, [magnetPreferences])
   useEffect(() => {
     if (!toast) return
     const timer = window.setTimeout(() => setToast(''), 4000)
@@ -185,47 +242,104 @@ export default function App() {
     setBackgroundCount(count => count + 1)
     setToast('后台会话已更新，当前固定会话保持不变。')
   }
+  async function changeMagnet(next: Partial<MagnetPreferences>) {
+    if (magnetWriteBusy.current) return
+    const preferences = { ...magnetPreferences, ...next }
+    magnetWriteBusy.current = true; setMagnetSaving(true)
+    try {
+      if (isNative) {
+        const state = await setNativeMagnetPreferences(preferences)
+        setMagnetState(state)
+        setMagnetPreferences(state.preferences)
+      } else setMagnetPreferences(preferences)
+    } catch { setToast('磁吸设置未应用，请重试。') }
+    finally { magnetWriteBusy.current = false; setMagnetSaving(false) }
+  }
   function pointerDown(event: PointerEvent<HTMLButtonElement>) {
     if (event.button !== 0) return
-    pointer.current = { x: event.clientX, y: event.clientY, originX: offset.x, originY: offset.y, moved: false, dragging: false }
-    if (!isNative) event.currentTarget.setPointerCapture(event.pointerId)
+    if (isNative && nativeGestureBusy.current) return
+    const stage = stageRef.current?.getBoundingClientRect(), ball = orbRef.current?.getBoundingClientRect()
+    if (!stage || !ball) return
+    pointer.current = { x: isNative ? event.screenX : event.clientX, y: isNative ? event.screenY : event.clientY, moved: false,
+      rect: { x: ball.x - stage.x, y: ball.y - stage.y, width: ball.width, height: ball.height } }
+    event.currentTarget.setPointerCapture(event.pointerId)
+    if (isNative) {
+      nativeGestureBusy.current = true
+      pointer.current.nativeStart = beginNativeMagneticDrag(event.clientX / innerWidth, event.clientY / innerHeight)
+      void pointer.current.nativeStart.catch(() => setToast('拖动暂不可用。'))
+    }
   }
   function pointerMove(event: PointerEvent<HTMLButtonElement>) {
     const start = pointer.current
     if (!start) return
-    const dx = event.clientX - start.x
-    const dy = event.clientY - start.y
-    if (!start.moved && Math.hypot(dx, dy) < 6) return
+    const dx = (isNative ? event.screenX : event.clientX) - start.x
+    const dy = (isNative ? event.screenY : event.clientY) - start.y
+    if (!start.moved && Math.hypot(dx, dy) < 4) return
     start.moved = true
-    if (isNative) {
-      if (start.dragging) return
-      start.dragging = true
-      void dragNativeWindow().catch(() => setToast('拖动暂不可用。'))
-      return
-    }
+    if (isNative) return
+    setDragging(true)
     const stage = stageRef.current?.getBoundingClientRect()
     if (!stage) return
-    const minX = -(stage.width - (expanded ? 378 : 108))
-    const minY = -(stage.height - (expanded ? 620 : 120))
-    setOffset({ x: Math.max(Math.min(0, minX), Math.min(0, start.originX + dx)), y: Math.max(Math.min(0, minY), Math.min(0, start.originY + dy)) })
+    const rect = { ...start.rect, x: Math.max(6, Math.min(stage.width - start.rect.width - 6, start.rect.x + dx)),
+      y: Math.max(6, Math.min(stage.height - start.rect.height - 6, start.rect.y + dy)) }
+    if (!previewLayout) setPreviewLayout(previewPanelLayout(rect, stage))
+    setPreviewSnap(null)
+    setOffset({ x: rect.x, y: rect.y })
   }
-  function pointerUp(event: PointerEvent<HTMLButtonElement>) {
+  function previewPanelLayout(rect: Rect, stage: { width: number; height: number }) {
+    const left = stage.width - rect.x >= rect.x + rect.width
+    const top = stage.height - rect.y - rect.height >= rect.y
+    return { left, top, width: (left ? stage.width - rect.x : rect.x + rect.width) - 6,
+      height: Math.max(80, (top ? stage.height - rect.y - rect.height : rect.y) - 18) }
+  }
+  function finishPreviewDrag(start: NonNullable<typeof pointer.current>, x: number, y: number) {
+    const stage = stageRef.current?.getBoundingClientRect()
+    if (!stage) return
+    const mock = stageRef.current?.querySelector('.mock-window')?.getBoundingClientRect()
+    const windows = mock ? [{ x: mock.x - stage.x, y: mock.y - stage.y, width: mock.width, height: mock.height }] : []
+    const result = dockPreview({ ...start.rect, x: start.rect.x + x - start.x, y: start.rect.y + y - start.y },
+      { x: 6, y: 6, width: stage.width - 12, height: stage.height - 12 }, windows, magnetPreferences, { x: x - stage.x, y: y - stage.y })
+    setOffset({ x: result.rect.x, y: result.rect.y })
+    setPreviewSnap(result.kind)
+    setPreviewLayout(previewPanelLayout(result.rect, stage))
+  }
+  async function pointerUp(event: PointerEvent<HTMLButtonElement>) {
     if (event.button !== 0 || !pointer.current) return
-    const wasMoved = pointer.current.moved
-    if (wasMoved) event.preventDefault()
+    const start = pointer.current
     pointer.current = null
-    if (wasMoved) return
+    setDragging(false)
+    let wasMoved = start.moved || Math.hypot((isNative ? event.screenX : event.clientX) - start.x, (isNative ? event.screenY : event.clientY) - start.y) >= 4
+    const release = { anchorX: event.clientX / innerWidth, anchorY: event.clientY / innerHeight, moved: wasMoved }
+    if (isNative) {
+      try {
+        await start.nativeStart
+        const state = await endNativeMagneticDrag(release)
+        setMagnetState(state)
+        wasMoved = wasMoved || state.lastDragMoved || Math.hypot(event.screenX - start.x, event.screenY - start.y) >= 4
+      } catch { return }
+      finally { nativeGestureBusy.current = false }
+    }
+    if (wasMoved) {
+      if (!isNative) finishPreviewDrag(start, event.clientX, event.clientY)
+      return
+    }
     setExpanded(open => !open)
     setView('overview')
   }
+  function pointerCancel() {
+    const start = pointer.current
+    pointer.current = null; setDragging(false)
+    if (isNative && start) void Promise.resolve(start.nativeStart).then(() => endNativeMagneticDrag()).then(setMagnetState).catch(() => {}).finally(() => { nativeGestureBusy.current = false })
+    else if (start?.moved) finishPreviewDrag(start, start.x + offset.x - start.rect.x, start.y + offset.y - start.rect.y)
+  }
 
-  const orb = <div className={`orb-dock level-${health.level}`} style={{ '--orb-x': `${offset.x}px`, '--orb-y': `${offset.y}px` } as CSSProperties}>
+  const orb = <div ref={dockRef} className={`orb-dock level-${health.level} risk-${dynamicColor ? risk.tone : 'neutral'} ${previewLayout ? 'preview-placed' : ''} ${dockLeft ? 'dock-left' : ''} ${dockTop ? 'dock-top' : ''} ${dragging || magnetState?.dragging ? 'is-dragging' : ''} ${snapped ? 'is-snapped' : ''}`} style={{ '--orb-x': `${offset.x}px`, '--orb-y': `${offset.y}px`, '--preview-panel-width': `${previewLayout?.width ?? 340}px`, '--preview-panel-height': `${previewLayout?.height ?? 600}px` } as CSSProperties}>
     {expanded && <section
       id="orb-panel" className="orb-panel" data-testid="orb-panel" ref={panelRef} tabIndex={-1}
       role="dialog" aria-label="会话状态" onKeyDown={event => { if (event.key === 'Escape') closePanel() }}
     >
       <header className="panel-top">
-        <div className="panel-brand"><OrbMark /><span>Context Orb</span><span className="version-pill">v0.3 预览</span></div>
+        <div className="panel-brand"><OrbMark /><span>Context Orb</span><span className="version-pill">v0.4 预览</span></div>
         <button className="icon-button" aria-label="收起面板" onClick={closePanel}><X size={17} /></button>
       </header>
       {view !== 'overview' && <button className="back-button" onClick={() => { setView('overview'); setHistoricalReport(null) }}><ArrowLeft size={14} />返回概览</button>}
@@ -235,15 +349,11 @@ export default function App() {
           <span className="binding-copy"><strong data-testid="bound-session">{snapshot?.title ?? '尚未固定会话'}</strong><small>{snapshot ? '手动固定 · 不随后台任务切换' : '点击选择要关注的会话'}</small></span>
           <ChevronDown size={15} />
         </button>
-        <div className="health-heading">
-          <span className={`status-chip status-${health.level}`}><i />{health.label}</span>
-          <h2>{health.headline}</h2>
-          <p>{health.description}</p>
-        </div>
+        <ContextReadout snapshot={snapshot} now={now} showCompactions={showCompactions} />
         <div className="semantic-card" data-testid="semantic-card">
           <div className="semantic-card-label"><span>下一步的检查依据</span><span className="source-label">{snapshot?.source === 'demo' ? '模拟收据' : report ? '本地文件检查' : '尚未收集'}</span></div>
           {report ? <>
-            <div className="semantic-facts"><div><strong>{health.checks.passed + health.checks.failed}<span> 项</span></strong><small>已完成文件检查</small></div><span className="fact-separator" /><div><strong>{health.checks.failed + health.checks.unknown}<span> 项</span></strong><small>失败或未知的检查</small></div></div>
+            <div className="check-tally"><span><b>{health.checks.passed}</b> 通过</span><span><b>{health.checks.failed}</b> 偏差</span><span><b>{health.checks.unknown}</b> 未知</span></div>
             {report.probes.some(probe => probe.result !== 'pass') ? <div className="signal-previews">{report.probes.filter(probe => probe.result !== 'pass').slice(0, 2).map(probe => <div className="signal-preview" key={probe.id}><i /><span>{describeProbe(report, probe)}</span><small>{RESULT_LABELS[probe.result]}</small></div>)}</div>
               : !health.unresolved.length && <div className="clear-result"><ShieldCheck size={16} /><span>所列条件在采集的文件版本中通过</span></div>}
             {!!health.unresolved.length && <p className="overview-gap">待补齐：{health.unresolved[0]}</p>}
@@ -341,8 +451,17 @@ export default function App() {
         <button className="primary-button full-width" onClick={() => void copyText(handoff, '已复制。可先在原会话核对并纠正；新开收益尚未评估。')}><Copy size={15} />复制任务简报</button>
         <p className="micro-note">检查收据只对应采集时点；目标或文件改变后需要重新核验。</p>
       </div>}
-      {view === 'settings' && <div className="subview">
-        <h2>恰好够用的提醒</h2><p className="subview-intro">让信息可见，让注意力留在工作上。</p>
+      {view === 'settings' && <div className="subview settings-view">
+        <h2>按你的习惯停靠</h2><p className="subview-intro">拖动后松手，自动停靠最近的边框。</p>
+        <fieldset className="magnet-settings"><legend><Magnet size={14} />窗口吸附</legend>
+          <div className="window-modes">{(['codex', 'off', 'all'] as WindowMagnetMode[]).map(mode => <label key={mode} className={magnetPreferences.windowMode === mode ? 'selected' : ''}><input type="radio" name="window-magnet" aria-label={mode === 'codex' ? '仅限 Codex 窗口' : WINDOW_MODE_LABELS[mode]} disabled={magnetControlsDisabled} checked={magnetPreferences.windowMode === mode} onChange={() => void changeMagnet({ windowMode: mode })} /><span>{WINDOW_MODE_LABELS[mode]}</span></label>)}</div>
+          <p>{magnetPreferences.windowMode === 'codex' ? '在 Codex 窗口内松手，停靠它最近的边；其余位置停靠屏幕边缘。' : magnetPreferences.windowMode === 'all' ? '在可见窗口内松手，停靠它最近的边；其余位置停靠屏幕边缘。' : '每次松手，都停靠当前屏幕最近的边缘。'}</p>
+          {isNative && magnetState?.capabilities.reason && <p className="magnet-caveat">窗口信息暂不可用，请确认桌面会话与显示器可用后重试。</p>}
+          {isNative && magnetState?.capabilities.codexGui === 'unavailable' && magnetPreferences.windowMode === 'codex' && <p className="magnet-caveat">此平台暂不能可靠识别 Codex，可切换为「所有窗口」。</p>}
+          {!isNative && <small>此处演示网页内拖拽；桌面版使用真实窗口边界。</small>}
+        </fieldset>
+        <div className="setting-row"><div><strong>球体动态配色</strong><small>随脏度线索变化，保留状态符号</small></div><button className="switch" role="switch" aria-label="球体动态配色" aria-checked={dynamicColor} onClick={() => setDynamicColor(value => !value)}><span /></button></div>
+        <div className="setting-row"><div><strong>显示压缩次数</strong><small>在容量下方显示，不参与脏度判断</small></div><button className="switch" role="switch" aria-label="显示压缩次数" aria-checked={showCompactions} onClick={() => setShowCompactions(value => !value)}><span /></button></div>
         <div className="setting-row"><div><strong>外观</strong><small>与你的工作环境协调</small></div><button className="theme-toggle" onClick={() => setTheme(theme === 'light' ? 'dark' : 'light')} aria-label="切换面板主题">{theme === 'light' ? <Moon size={17} /> : <Sun size={17} />}</button></div>
         <div className="setting-row"><div><strong>稍后提醒</strong><small>{snoozed ? '此会话已暂停 10 分钟' : '需要安静时，暂停 10 分钟'}</small></div><button className="text-button" disabled={!snapshot} onClick={() => { if (snoozed && pinnedId) { setSnoozedSessions(current => ({ ...current, [pinnedId]: 0 })); setToast('此会话提醒已恢复。') } else snooze() }}>{snoozed ? '恢复' : '暂停'}</button></div>
         <div className="setting-row"><div><strong>检查依据</strong><small>声明的条件与采集的文件版本</small></div><button className="text-button" onClick={() => setView('review')}>复查</button></div>
@@ -351,21 +470,23 @@ export default function App() {
       </div>}
     </section>}
     <div className="orb-bottom-row">
-      {!expanded && !widgetSurface && <div className="resting-caption"><span>{snoozed ? '安静 10 分钟' : health.label}</span><ArrowDownLeft size={14} /></div>}
+      {!expanded && !widgetSurface && !previewLayout && <div className="resting-caption"><span>{snoozed ? '安静 10 分钟' : health.label}</span><ArrowDownLeft size={14} /></div>}
       <button
         ref={orbRef} className={`orb-button ${snoozed ? 'snoozed' : ''}`}
         aria-label={expanded ? '收起 Context Orb' : '展开 Context Orb'} aria-expanded={expanded}
-        aria-controls="orb-panel" title="点击展开，拖动定位"
-        onPointerDown={pointerDown} onPointerMove={pointerMove} onPointerUp={pointerUp} onPointerCancel={() => { pointer.current = null }}
+        aria-controls="orb-panel" aria-describedby="orb-state-description" title={`${risk.value} · ${capacity.percent === null ? '用量未接入' : `容量 ${capacity.percent}%（演示）`} · 点击展开，拖动定位`}
+        onPointerDown={pointerDown} onPointerMove={pointerMove} onPointerUp={event => void pointerUp(event)} onPointerCancel={pointerCancel} onLostPointerCapture={pointerCancel}
         onClick={event => { if (event.detail === 0) { setExpanded(open => !open); setView('overview') } }}
       >
-        <svg className="orb-ring" viewBox="0 0 80 80" aria-hidden="true">
+        <svg className={`orb-ring ${capacity.ratio === null ? 'capacity-unknown' : 'capacity-known'}`} viewBox="0 0 80 80" aria-hidden="true">
           <circle className="orb-ring-base" cx="40" cy="40" r="36" />
-          <circle className="orb-ring-fill" cx="40" cy="40" r="36" strokeDasharray={health.level === 'unknown' ? '4 14' : '62 13.4'} />
+          <circle className="orb-ring-fill" cx="40" cy="40" r="36" pathLength="100" strokeDasharray={capacity.ratio === null ? '1 7' : '100 100'} strokeDashoffset={capacity.ratio === null ? 0 : 100 - capacity.ratio * 100} />
         </svg>
-        <span className="orb-core">{snoozed ? <BellOff size={22} /> : <OrbMark />}</span>
-        <span className="orb-status-dot" />
+        <span className="orb-core">{snoozed ? <BellOff size={22} /> : capacity.percent !== null ? <span className="orb-capacity">{capacity.percent}<small>%</small></span> : <OrbMark />}</span>
+        <span className="orb-status-dot" aria-hidden="true">{risk.tone === 'aligned' ? '✓' : risk.tone === 'deviation' ? '!' : '?'}</span>
+        {(dragging || magnetState?.dragging) && <span className="snap-indicator" aria-hidden="true"><Magnet size={11} /></span>}
       </button>
+      <span id="orb-state-description" className="sr-only">脏度线索：{risk.value}。上下文容量：{capacity.percent === null ? '未接入' : `${capacity.percent}%，演示用量`}。{showCompactions && `压缩次数：${compactions.value}。`}{snapped && `已吸附${snapped === 'screen' ? '屏幕' : '窗口'}边缘。`}</span>
     </div>
   </div>
 
@@ -381,7 +502,7 @@ export default function App() {
         <div className="eyebrow"><span />EVIDENCE FOR YOUR NEXT STEP</div>
         <h1>专注，<br />让思路<span className="serif-word">清楚。</span></h1>
         <p className="intro-copy">留下有效的要求，核对这一步的依据。<br />让旧说法有去处，让下一步看得清。</p>
-        <div className="platform-row"><span><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M13.4 3.7c.8-1 1-2 .9-2.7-1 .1-2.1.6-2.8 1.5-.7.8-1 1.9-.9 2.7 1 .1 2-.5 2.8-1.5ZM16.9 14.2c-.4.9-.6 1.3-1.1 2.1-.7 1-1.6 2.4-2.8 2.4-1.1 0-1.4-.7-2.9-.7s-1.8.7-2.9.7c-1.2 0-2-1.2-2.7-2.2C2.5 13.6 2 9.7 3.3 7.7c.9-1.4 2.3-2.1 3.6-2.1 1.2 0 2 .7 3 .7s1.6-.7 3-.7c1.1 0 2.4.6 3.3 1.7-2.9 1.6-2.4 5.6.7 6.9Z" fill="currentColor"/></svg>macOS</span><span><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m2 4 7-1v6H2V4Zm8-1.2L18 2v7h-8V2.8ZM2 10h7v6l-7-1v-5Zm8 0h8v7l-8-1v-6Z" fill="currentColor"/></svg>Windows</span><span className="platform-stage">框架 v0.3</span></div>
+        <div className="platform-row"><span><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M13.4 3.7c.8-1 1-2 .9-2.7-1 .1-2.1.6-2.8 1.5-.7.8-1 1.9-.9 2.7 1 .1 2-.5 2.8-1.5ZM16.9 14.2c-.4.9-.6 1.3-1.1 2.1-.7 1-1.6 2.4-2.8 2.4-1.1 0-1.4-.7-2.9-.7s-1.8.7-2.9.7c-1.2 0-2-1.2-2.7-2.2C2.5 13.6 2 9.7 3.3 7.7c.9-1.4 2.3-2.1 3.6-2.1 1.2 0 2 .7 3 .7s1.6-.7 3-.7c1.1 0 2.4.6 3.3 1.7-2.9 1.6-2.4 5.6.7 6.9Z" fill="currentColor"/></svg>macOS</span><span><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m2 4 7-1v6H2V4Zm8-1.2L18 2v7h-8V2.8ZM2 10h7v6l-7-1v-5Zm8 0h8v7l-8-1v-6Z" fill="currentColor"/></svg>Windows</span><span className="platform-stage">框架 v0.4</span></div>
         <div className="scenario-controls">
           <div className="section-label"><span>试试四种状态</span><span>01 — 04</span></div>
           <div className="scenario-grid" role="group" aria-label="演示状态">
