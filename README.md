@@ -1,8 +1,8 @@
 # Context Orb
 
-**专注，让思路清楚。** 面向 Codex 的本地悬浮球：多次压缩后，当旧信息与未解决的冲突开始干扰下一步，建议整理有效信息并新开会话。
+**专注，让思路清楚。** 面向 Codex 的本地悬浮球，保留有效要求，核对下一步的依据。
 
-> **v0.2.0 · 语义评估框架与交互预览。** 已实现可解释规则、证据面板、澄清后复查演示、干净交接模板，以及 Codex skill → 本地报告 → 桌面读取通路。真实评估目前由用户主动发起。自动后台评估、系统通知和前台会话自动跟随尚未实现；规则尚未用真实任务校准。
+> **v0.3.0 · 任务账本与文件检查。** 已实现有来源的任务账本、明确作废关系、本地文件检查、版本历史和下一步简报。用户主动发起收集；结果只反映声明范围与采集时点。自动语义诊断、换会话收益评估、系统通知和前台自动跟随尚未实现。
 
 ![Context Orb 交互预览](docs/assets/design-preview.png)
 
@@ -10,14 +10,14 @@
 
 ## 判断什么
 
-| 观察 | 处理 |
+| 证据 | 展示 |
 | --- | --- |
-| 会话很长、压缩很多次，但目标和下一步一致 | 可以继续 |
-| 可核对的约束遗漏或冲突仍影响下一步 | 先澄清，再复查 |
-| 多次压缩后，纠正过的问题复现，并有不同执行偏差印证 | 建议整理干净交接 |
-| 身份不匹配、报告过期、后续活动或证据不足 | 等待评估 |
+| 所列有效约束和关键条目的文件检查通过，范围没有待核验项 | 所列检查通过 |
+| 任意实际文件检查失败 | 检查未通过，即使还存在未知项 |
+| 缺失来源、手动检查、未验证假设或范围不完整 | 证据待补齐 |
+| 原要求已被后来的有效要求替代 | 保留来源与作废关系，不进入当前检查 |
 
-容量、轮数和文件大小不参与健康判定，没有“信息熵百分比”。[规则与反例](docs/SEMANTIC-REVIEW.md)。
+检查器支持文字包含、不包含和 SHA-256 比对。文字条件通过不证明代码行为正确；声明的要求也不等于独立采集了原始用户消息。没有“信息熵百分比”，压缩次数和经过时间不产生换会话建议。新开收益始终为“尚未评估”。[判断边界](docs/SEMANTIC-REVIEW.md)。
 
 ## 立即体验
 
@@ -32,33 +32,32 @@ npm run dev
 
 打开[本地预览](http://127.0.0.1:1427)。也可执行 `node scripts/start-preview.mjs` 安装锁定依赖并启动。
 
-浏览器中的会话、压缩次数和证据均为虚构。可切换状态、查看依据、模拟澄清、固定会话、暂停提醒展示、编辑并复制交接模板。支持深浅主题、拖动和键盘操作。
+浏览器中的会话、文件版本和检查结果均为虚构。可查看来源与账本、模拟修改后重新采集、回顾历史、固定会话、暂缓提醒展示、编辑并复制简报。支持深浅主题、拖动和键盘操作。
 
 ## 桌面与插件
 
 安装 [Tauri 前置依赖](https://v2.tauri.app/start/prerequisites/)与 Rust，关闭占用 1427 端口的独立预览，再运行 `npm run desktop:dev`。
 
-原生窗口默认未绑定、等待评估。启用[仓库插件](plugins/codex-context-orb/README.md)后，在目标 Codex 会话中请求 `$context-health`。身份可验证时，skill 将最小化评估写入本机，桌面读取显示。复制评估指令本身不会运行评估。
+启用[仓库插件](plugins/codex-context-orb/README.md)后，在目标 Codex 会话请求 `$context-health`。技能整理声明范围与检查条件，Python 收集器读取明确选定的工作区文件，生成收据并保存；桌面按精确会话 ID 读取。原生窗口默认未绑定，需手动固定。复制检查指令本身不会运行检查。
 
-Hook 仅保存生命周期元数据；手动评估另存目标、下一步、问题摘要与证据位置。这些摘要可能包含项目私密信息，只应保存在本机。悬浮球不读取 Codex 原始对话文件或凭证，不新增外部 AI 请求；评估由用户现有 Codex 模型完成。
+Hook 只保存生命周期元数据。收据另存必要的要求摘要、来源路径、文件哈希和检查结果；不保存完整文件内容，但这些摘要仍可能包含私密项目信息。Orb 不读取私有对话文件或凭证，不上传报告，不新增外部 AI 请求。
 
-`npm run desktop:build` 用于开发打包。尚无签名、正式验收的安装包；插件源码不代表已安装或官方上架，也不能单独提供系统悬浮窗。
+`npm run desktop:build` 用于开发打包。尚无签名且通过平台验收的安装包；插件源码不代表已安装或官方上架，插件也不能单独提供系统悬浮窗。
 
 ## 文档与检查
 
-[语义评估](docs/SEMANTIC-REVIEW.md) · [UI / UX](docs/UIUX.md) · [架构](docs/ARCHITECTURE.md) · [分发](docs/DISTRIBUTION.md) · [路线图](docs/ROADMAP.md) · [验证记录](docs/VERIFICATION.md)
+[判断设计](docs/SEMANTIC-REVIEW.md) · [数据契约](docs/EVIDENCE-CONTRACT.md) · [UI / UX](docs/UIUX.md) · [架构](docs/ARCHITECTURE.md) · [分发](docs/DISTRIBUTION.md) · [路线图](docs/ROADMAP.md) · [验证记录](docs/VERIFICATION.md)
 
 ```sh
 npm run check
 python3 plugins/codex-context-orb/scripts/test_hooks.py
 python3 plugins/codex-context-orb/scripts/test_assessments.py
+python3 plugins/codex-context-orb/scripts/test_evidence_review.py
 cargo test --manifest-path src-tauri/Cargo.toml --locked
 npx playwright install chromium
 npm run test:ui
 ```
 
-Windows 使用 `py -3` 代替 `python3`。测试仅用虚构数据和临时目录。
+Windows 使用 `py -3` 代替 `python3`。测试只用虚构数据或临时目录。旧版 v1 主观评估仅供回顾，不再驱动状态。
 
-始终保留未知、明确手动固定，不自动创建、压缩、中断或关闭会话。代码测试、运行时接入、规则准确率、平台分发与插件审核分别验收。
-
-[MIT License](LICENSE).
+不自动创建、压缩、中断或关闭会话。代码检查、真实客户端接入、算法准确率、平台分发与插件审核分别验收。[MIT License](LICENSE)。

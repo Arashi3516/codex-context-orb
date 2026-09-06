@@ -1,7 +1,10 @@
-export type HealthLevel = 'healthy' | 'watch' | 'handoff' | 'unknown'
-export type TelemetrySource = 'demo' | 'codex-hook' | 'codex-skill-review'
-export type SignalKind = 'goal_drift' | 'constraint_loss' | 'decision_conflict' | 'stale_fact' | 'repeated_work'
+import { ITEM_LABELS, RULE_LABELS, isEvidenceReport, type EvidenceReport, type ProbeResult, type SignalKind } from './evidence'
 
+export type HealthLevel = 'healthy' | 'watch' | 'unknown'
+export type TelemetrySource = 'demo' | 'codex-hook' | 'codex-skill-review' | 'codex-evidence-review'
+export type { SignalKind } from './evidence'
+
+/** Legacy v1 is kept for historical viewing only. Its heuristics no longer issue advice. */
 export interface SemanticSignal {
   id: string
   kind: SignalKind
@@ -13,8 +16,6 @@ export interface SemanticSignal {
   confidence: 'low' | 'medium' | 'high'
   evidence: { ref: string; note: string }[]
 }
-
-/** A scoped review, not a measurement of the model's internal state or entropy. */
 export interface SemanticAssessment {
   schema_version: 1
   source: 'codex-skill-review'
@@ -28,7 +29,6 @@ export interface SemanticAssessment {
   review_note: string
   signals: SemanticSignal[]
 }
-
 export interface ContextSnapshot {
   id: string
   title: string
@@ -36,137 +36,130 @@ export interface ContextSnapshot {
   model: string | null
   observedAt: number
   turnId?: string | null
-  // Diagnostic values are deliberately excluded from the decision rule.
   usedTokens: number | null
   windowTokens: number | null
   compactions: number | null
   lastEvent?: string
   assessment?: SemanticAssessment | null
+  report?: EvidenceReport | null
 }
-
 export interface ContextHealth {
   level: HealthLevel
   label: string
   headline: string
   description: string
-  reasons: { title: string; description: string }[]
-  actionable: SemanticSignal[]
+  report: EvidenceReport | null
   reviewedAt: number | null
+  checks: { passed: number; failed: number; unknown: number }
+  unresolved: string[]
+  notices: string[]
+  restartBenefit: 'not_evaluated'
 }
 
 export const SIGNAL_LABELS: Record<SignalKind, string> = {
-  goal_drift: '目标串线', constraint_loss: '约束遗漏', decision_conflict: '决策冲突',
-  stale_fact: '旧结论回流', repeated_work: '重复返工',
+  goal_drift: '目标偏离', constraint_loss: '约束遗漏', decision_conflict: '决策冲突',
+  stale_fact: '旧结论回流', repeated_work: '无效重复',
 }
 
-export const DEFAULT_POLICY = { minimumCompactions: 2, reviewMaxAgeMs: 20 * 60 * 1000 }
-
-function unknown(description: string, reviewedAt: number | null = null): ContextHealth {
+function unknown(description: string): ContextHealth {
   return {
-    level: 'unknown', label: '等待评估', headline: '先确认这段思路是否清楚',
-    description, reasons: [], actionable: [], reviewedAt,
+    level: 'unknown', label: '证据待补齐', headline: '先核对下一步的依据', description,
+    report: null, reviewedAt: null, checks: { passed: 0, failed: 0, unknown: 0 },
+    unresolved: [], notices: [], restartBenefit: 'not_evaluated',
   }
 }
 
-function references(signal: SemanticSignal) {
-  return new Set(signal.evidence.map(item => item.ref.trim()).filter(Boolean))
-}
-
-/** Two descriptions of the same observation are not independent failures. */
-function independent(a: SemanticSignal, b: SemanticSignal) {
-  if (a.id === b.id || a.kind === b.kind) return false
-  const left = references(a), right = references(b)
-  return [...left].some(ref => !right.has(ref)) && [...right].some(ref => !left.has(ref))
-}
-
-export function evaluateContext(snapshot: ContextSnapshot | undefined, now = Date.now(), policy = DEFAULT_POLICY): ContextHealth {
-  if (!snapshot) return unknown('固定正在关注的会话，再检查当前目标、有效约束和下一步。')
-  const review = snapshot.assessment
-  if (!review) return unknown('尚无语义评估。长度和压缩次数无法说明后续执行是否受干扰。')
-  if (review.schema_version !== 1 || review.source !== 'codex-skill-review' || review.session_id !== snapshot.id) {
-    return unknown('评估与当前固定会话不匹配，等待新的评估。')
+/** A result is permanently scoped to collection time; it never certifies a live model context. */
+export function evaluateContext(snapshot: ContextSnapshot | undefined, now = Date.now()): ContextHealth {
+  if (!snapshot) return unknown('手动固定一个会话，再收集当前目标、有效约束与下一步检查。')
+  const report = snapshot.report
+  if (!report) return unknown(snapshot.assessment
+    ? '旧版评估仅供回顾。请收集带来源与实际检查结果的新报告。'
+    : '尚无证据报告。先声明检查范围，再核验明确选定的文件。')
+  if (!isEvidenceReport(report) || report.session_id !== snapshot.id) return unknown('报告身份或证据引用无法验证，请重新收集。')
+  if (!Number.isSafeInteger(now) || now < 0 || report.reviewed_at_ms > now + 60_000) return unknown('报告时间无法验证，请检查本地时钟。')
+  const sources = new Map(report.sources.map(source => [source.id, source]))
+  const active = report.ledger.filter(item => item.status === 'active')
+  const probes = report.probes
+  const checks = {
+    passed: probes.filter(probe => probe.result === 'pass').length,
+    failed: probes.filter(probe => probe.result === 'fail').length,
+    unknown: probes.filter(probe => probe.result === 'unknown').length,
   }
-  const stamp = review.reviewed_at_ms
-  if (!Number.isSafeInteger(stamp) || stamp < 0 || stamp > now + 60_000 || now - stamp > policy.reviewMaxAgeMs) {
-    return unknown('这份评估已过期或时间无法验证，需要结合当前进展重新检查。')
-  }
-  if (!Number.isSafeInteger(snapshot.observedAt) || snapshot.observedAt < 0 || snapshot.observedAt > now + 60_000) {
-    return unknown('会话事件时间无法验证，需要结合当前进展重新检查。', stamp)
-  }
-  if (snapshot.turnId && review.turn_id && snapshot.turnId !== review.turn_id) {
-    return unknown('会话已进入另一轮。上一轮评估不能直接代表当前执行状态。', stamp)
-  }
-  if (snapshot.observedAt > stamp) {
-    return unknown('评估后又收到会话事件。这份报告只反映评估当时，请结合当前进展复查。', stamp)
-  }
-  const count = review.compactions_observed
-  if (count !== null && (!Number.isSafeInteger(count) || count < 0 || count > 10_000)) {
-    return unknown('压缩记录无法验证，不能据此建议换会话。')
-  }
-  const open = review.signals.filter(signal => signal.status === 'open' && signal.affects_next_step)
-  const actionable = open.filter(signal => signal.confidence !== 'low' && references(signal).size >= 2)
-  const strong = actionable.filter(signal => signal.after_compaction && signal.confidence === 'high')
-  const recurring = strong.filter(signal => signal.recurrence === 'after_correction' && references(signal).size >= 3)
-  const corroborated = recurring.some(a => strong.some(b => independent(a, b)))
-  const recommend = review.coverage === 'sufficient' && count !== null && count >= policy.minimumCompactions && corroborated
-  if (!actionable.length && (review.coverage !== 'sufficient' || open.length)) {
-    return unknown('可核对的证据还不够。先补齐目标、约束和最近执行记录，再判断是否需要交接。', stamp)
-  }
-  const level = recommend ? 'handoff' : actionable.length ? 'watch' : 'healthy'
+  const unresolved = [...report.scope.unknowns]
+  if (report.scope.origin === 'unknown') unresolved.push('会话来源尚未确认。')
+  if (report.scope.coverage === 'partial') unresolved.push('声明的任务范围仍不完整。')
+  if (active.some(item => item.source_ids.some(id => sources.get(id)?.status === 'unavailable'))) unresolved.push('有效条目的来源暂不可读。')
+  if (report.ledger.some(item => item.status === 'hypothesis')) unresolved.push('账本中还有尚未验证的假设。')
+  if (report.observations.some(item => item.status === 'open' && active.some(atom => atom.id === item.item_id))) unresolved.push('评估者记录的疑点仍需独立核验。')
+  const uncovered = active.filter(item => (item.kind === 'constraint' || item.critical)
+    && !probes.some(probe => probe.item_id === item.id && probe.rule !== 'manual' && probe.result !== 'unknown'))
+  if (uncovered.length) unresolved.push(`${uncovered.length} 项约束或关键条目缺少实际检查。`)
+  if (checks.unknown) unresolved.push(`${checks.unknown} 项检查尚无可核验结果。`)
+  if (!checks.passed && !checks.failed) unresolved.push('还没有完成任何文件检查。')
+  const level: HealthLevel = checks.failed ? 'watch' : unresolved.length ? 'unknown' : 'healthy'
   const copy = {
-    healthy: {
-      label: '脉络清晰', headline: '多次压缩，也可以继续专注',
-      description: '本次评估中，当前目标与下一步保持一致，没有发现仍在干扰执行的信息冲突。',
-    },
-    watch: {
-      label: '需要留意', headline: '先理清这一点，再继续',
-      description: review.coverage === 'partial'
-        ? '有限记录中发现待核对的执行偏差。先澄清具体问题，再补一轮评估。'
-        : '已发现影响下一步的疑点。先核对有效约束、澄清冲突，再观察能否恢复清晰。',
-    },
-    handoff: {
-      label: '建议新开', headline: '这段思路，适合重新开始',
-      description: '多次压缩后，纠正过的问题仍在回流，且有不同执行偏差相互印证。建议整理有效信息，在新会话继续。',
-    },
+    healthy: { label: '所列检查通过', headline: '这一步，有据可循', description: '采集时，声明范围内的检查均已通过。原始要求由本次评估整理，文件随后变化时需要重新检查。' },
+    watch: { label: '检查未通过', headline: '先处理这个具体偏差', description: '所选文件没有满足声明的检查条件。先核对来源与改动，再决定如何继续。' },
+    unknown: { label: '证据待补齐', headline: '还有前提需要确认', description: '目前不能判断全部所列检查。保留已获得的结果，并补齐下面的未知项。' },
   }[level]
-  return {
-    level, ...copy, actionable, reviewedAt: stamp,
-    reasons: actionable.map(signal => ({ title: SIGNAL_LABELS[signal.kind], description: signal.summary })),
+  const notices = ['截至采集时点的结果，不是当前模型上下文的实时保证。']
+  if (snapshot.lastEvent && Number.isSafeInteger(snapshot.observedAt) && snapshot.observedAt > report.reviewed_at_ms) {
+    notices.push('报告之后收到新的会话活动；执行前请核对范围与文件版本。')
   }
+  if (snapshot.turnId && report.turn_id && snapshot.turnId !== report.turn_id) notices.push('会话活动属于另一轮；这份报告仍仅对应原检查范围。')
+  return { level, ...copy, report, reviewedAt: report.reviewed_at_ms, checks,
+    unresolved: [...new Set(unresolved)], notices, restartBenefit: 'not_evaluated' }
 }
 
-/** Never fall back to the most recently active session. */
 export function resolvePinned(sessions: ContextSnapshot[], pinnedId: string | null) {
   return pinnedId ? sessions.find(session => session.id === pinnedId) : undefined
 }
 
+export function describeProbe(report: EvidenceReport, probe: ProbeResult) {
+  return report.ledger.find(item => item.id === probe.item_id)?.text ?? '未知条目'
+}
+
+/** The same reviewed state can be reused in the current conversation or a new one. */
 export function createHandoffTemplate(snapshot: ContextSnapshot | undefined, now = Date.now()): string {
   const health = evaluateContext(snapshot, now)
-  const review = health.level !== 'unknown' ? snapshot?.assessment : null
+  const report = health.report
+  const active = report?.ledger.filter(item => item.status === 'active') ?? []
+  const refs = (ids: string[]) => ids.map(id => report?.sources.find(source => source.id === id)?.ref ?? id).join('；')
   return [
-    `# 干净交接 · ${snapshot?.title ?? '待填写的任务'}`,
-    '', '## 当前唯一目标',
-    review ? `${review.current_goal}\n[来自最近评估，请先核对是否仍有效]` : '[填写当前仍要完成的一件事]',
-    '', '## 已确认的事实与结果', '[仅保留已验证结论，附文件或证据位置]',
-    '', '## 仍然有效的约束', '[以最新确认的约束为准；排除已经作废的要求]',
-    '', '## 下一步',
-    review ? `${review.next_step}\n[执行前核对前置条件]` : '[写明下一项可执行动作及验收条件]',
-    '', '## 交接前须澄清的疑点（不能当作已确认事实）',
-    ...health.actionable.map(signal => `- ${SIGNAL_LABELS[signal.kind]}：${signal.summary}`),
-    '[解决冲突后写入有效结论；不把互相矛盾的旧说法一起带过去]',
-    '', '## 明确不再沿用的信息', '[列出已废弃的方案、旧事实和无关目标；未核实的信息继续标为未知]',
-    '', '这是待填写的交接模板。填写并核实后，再复制到新会话。',
+    '# 下一步任务简报', '',
+    '可用于当前会话内纠正，也可供你选择在新会话继续。新开收益尚未评估。',
+    report ? `采集时间：${new Date(report.reviewed_at_ms).toISOString()}\n报告版本：${report.report_id}` : '尚无可验证的 v2 报告，请先补齐以下内容。',
+    '', '## 当前声明的目标',
+    ...active.filter(item => item.id === report?.scope.goal_id).map(item => `${item.text} [来源：${refs(item.source_ids)}]`),
+    ...(!report ? ['[待确认]'] : []),
+    '', '## 声明的有效约束（执行前核对原始要求）',
+    ...active.filter(item => item.kind === 'constraint').map(item => `- ${item.text} [来源：${refs(item.source_ids)}]`),
+    '', '## 声明的事实、决策与进展（未必已独立核验）',
+    ...active.filter(item => ['fact', 'decision', 'progress'].includes(item.kind)).map(item => `- ${ITEM_LABELS[item.kind]}：${item.text} [来源：${refs(item.source_ids)}]`),
+    '', '## 本次检查结果（文字条件不证明行为正确）',
+    ...(report?.probes.map(probe => `- ${probe.result.toUpperCase()}：${describeProbe(report, probe)}；${RULE_LABELS[probe.rule]}${probe.expected ? ` ${JSON.stringify(probe.expected)}` : ''}；来源：${probe.source_id ? refs([probe.source_id]) : '未执行文件检查'}；${probe.detail}`) ?? ['[待收集]']),
+    '', '## 来源版本',
+    ...(report?.sources.filter(source => source.kind === 'artifact').map(source => `- ${source.ref}：${source.sha256 ?? '不可读 / 未验证'}`) ?? []),
+    '', '## 未知与待处理',
+    ...health.unresolved.map(item => `- ${item}`),
+    ...(report?.ledger.filter(item => item.status === 'hypothesis').map(item => `- 待验证假设：${item.text} [来源：${refs(item.source_ids)}]`) ?? []),
+    ...(report?.observations.filter(item => item.status === 'open' && report.ledger.find(atom => atom.id === item.item_id)?.status !== 'superseded').map(item => `- 评估者记录，尚待核验：${item.summary} [来源：${refs(item.source_ids)}]`) ?? []),
+    '', '## 不再沿用',
+    ...(report?.ledger.filter(item => item.status === 'superseded').map(item => `- ${item.text} [来源：${refs(item.source_ids)}]`) ?? []),
+    '', '## 下一步', report?.scope.next_step ?? '[待填写]',
+    '', '这是待核对的任务简报。文件、权限或目标变化后，重新验证相关前提。',
   ].join('\n')
 }
 
 export function createReviewPrompt(sessionId: string | null): string {
   return [
-    '请使用 $context-health 评估当前会话的压缩后语义完整性。',
-    sessionId ? `目标会话 ID：${sessionId}。请先核对身份，不按最近活动猜测。` : '先取得并核对当前会话的精确 ID；不能取得时只在本轮答复中报告，不绑定其他会话。',
-    '检查当前目标、仍有效的约束与最近执行行为。压缩次数和上下文长度本身不构成换会话理由。',
-    '重点找压缩后仍未解决、影响下一步、纠正后再次出现的约束遗漏、旧结论回流、目标串线或重复返工。',
-    '逐项给出来源位置，区分已解决问题、正常需求调整、工具故障和证据不足；不要生成虚构的熵值或评分。',
-    '将最小化的结构化评估保存在 Context Orb 的本地评估目录，供悬浮球显示；不保存完整对话或凭证。',
-    '无需创建、中断、压缩或关闭任何会话。',
+    '请使用 $context-health 收集当前任务的来源账本与下一步检查报告。',
+    sessionId ? `目标会话 ID：${sessionId}。请先核对身份，不按最近活动猜测。` : '先取得并核对当前会话的精确 ID；不能取得时只报告缺口，不绑定其他会话。',
+    '从本次可见的明确要求整理目标、约束、已作废决策和未知项，给出来源位置。声明的来源不等于宿主独立验证。',
+    '仅检查我当前任务中明确选定的工作区文件；为下一步列出可核验的文字或文件哈希条件。无法客观检查的条件设为 manual / unknown。',
+    '使用 evidence_review.py collect 生成实际检查结果，不手写 pass/fail，不读取私有 Codex 转录或凭证，也不调用额外模型。',
+    '报告只反映采集时点；压缩次数、引用数量和模型自报信心不决定健康或新开建议。',
+    '把有效状态整理为可在当前会话复用的简报；新开收益保持未评估。不要自动创建、中断或关闭会话。',
   ].join('\n')
 }

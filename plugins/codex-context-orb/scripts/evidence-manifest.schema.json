@@ -1,0 +1,398 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "session_id",
+    "turn_id",
+    "scope",
+    "ledger",
+    "observations",
+    "sources",
+    "probes"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "session_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"
+    },
+    "turn_id": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "origin",
+        "action_id",
+        "goal_id",
+        "next_step",
+        "coverage",
+        "unknowns"
+      ],
+      "properties": {
+        "mode": {
+          "const": "as_of"
+        },
+        "origin": {
+          "enum": [
+            "main",
+            "unknown"
+          ]
+        },
+        "action_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"
+        },
+        "goal_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"
+        },
+        "next_step": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f\\ud800-\\udfff]*$"
+        },
+        "coverage": {
+          "enum": [
+            "declared",
+            "partial"
+          ]
+        },
+        "unknowns": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 240,
+            "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f\\ud800-\\udfff]*$"
+          },
+          "minItems": 0,
+          "maxItems": 8
+        }
+      }
+    },
+    "ledger": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "kind",
+          "text",
+          "source_ids",
+          "status",
+          "supersedes",
+          "critical"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"
+          },
+          "kind": {
+            "enum": [
+              "goal",
+              "constraint",
+              "fact",
+              "decision",
+              "progress"
+            ]
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500,
+            "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f\\ud800-\\udfff]*$"
+          },
+          "source_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"
+            },
+            "minItems": 1,
+            "maxItems": 4,
+            "uniqueItems": true
+          },
+          "status": {
+            "enum": [
+              "active",
+              "superseded",
+              "hypothesis"
+            ]
+          },
+          "supersedes": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"
+            },
+            "minItems": 0,
+            "maxItems": 4,
+            "uniqueItems": true
+          },
+          "critical": {
+            "type": "boolean"
+          }
+        }
+      },
+      "minItems": 0,
+      "maxItems": 24
+    },
+    "observations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "item_id",
+          "kind",
+          "summary",
+          "status",
+          "recurrence",
+          "source_ids"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"
+          },
+          "item_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"
+          },
+          "kind": {
+            "enum": [
+              "goal_drift",
+              "constraint_loss",
+              "decision_conflict",
+              "stale_fact",
+              "repeated_work"
+            ]
+          },
+          "summary": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 240,
+            "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f\\ud800-\\udfff]*$"
+          },
+          "status": {
+            "enum": [
+              "open",
+              "resolved"
+            ]
+          },
+          "recurrence": {
+            "enum": [
+              "once",
+              "after_correction"
+            ]
+          },
+          "source_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"
+            },
+            "minItems": 1,
+            "maxItems": 4,
+            "uniqueItems": true
+          }
+        }
+      },
+      "minItems": 0,
+      "maxItems": 8
+    },
+    "sources": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "kind",
+          "ref",
+          "note"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"
+          },
+          "kind": {
+            "enum": [
+              "statement",
+              "artifact"
+            ]
+          },
+          "ref": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 240,
+            "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f\\ud800-\\udfff]*$"
+          },
+          "note": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 240,
+            "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f\\ud800-\\udfff]*$"
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "kind": {
+                  "const": "artifact"
+                }
+              },
+              "required": [
+                "kind"
+              ]
+            },
+            "then": {
+              "properties": {
+                "ref": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 240,
+                  "pattern": "^(?!/)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))(?!.*//)(?!.*[\\\\:])(?!.*(?:^|/)(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\\.|/|$))(?!.*[ .](?:/|$))[^\\u0000-\\u001f\\u007f-\\u009f\\ud800-\\udfff]+$"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "minItems": 0,
+      "maxItems": 16
+    },
+    "probes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "item_id",
+          "source_id",
+          "rule",
+          "expected"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"
+          },
+          "item_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"
+          },
+          "source_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "rule": {
+            "enum": [
+              "contains",
+              "not_contains",
+              "sha256",
+              "manual"
+            ]
+          },
+          "expected": {
+            "type": "string",
+            "minLength": 0,
+            "maxLength": 240,
+            "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f\\ud800-\\udfff]*$"
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "rule": {
+                  "const": "manual"
+                }
+              },
+              "required": [
+                "rule"
+              ]
+            },
+            "then": {
+              "properties": {
+                "source_id": {
+                  "type": "null"
+                },
+                "expected": {
+                  "const": ""
+                }
+              }
+            },
+            "else": {
+              "properties": {
+                "source_id": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"
+                },
+                "expected": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 240,
+                  "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f\\ud800-\\udfff]*$"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "rule": {
+                  "const": "sha256"
+                }
+              },
+              "required": [
+                "rule"
+              ]
+            },
+            "then": {
+              "properties": {
+                "expected": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "minItems": 0,
+      "maxItems": 32
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$comment": "Each UTF-8 document is limited to 65536 bytes. The CLI and Rust reader additionally enforce duplicate-key rejection, portable artifact paths (including case-insensitive Windows devices), unique IDs, exact references, active goal/probe references, acyclic supersession, receipt consistency, the current-time bound and canonical report hash. A receipt does not attest host identity or current artifact truth."
+}

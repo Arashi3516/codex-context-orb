@@ -1,0 +1,71 @@
+{
+  "schema_version": 2,
+  "session_id": "fixture-evidence-session",
+  "turn_id": "fixture-evidence-turn",
+  "scope": {
+    "mode": "as_of",
+    "origin": "main",
+    "action_id": "action-check-status",
+    "goal_id": "goal-review-status",
+    "next_step": "核对本地状态文件中的发布标记。",
+    "coverage": "declared",
+    "unknowns": []
+  },
+  "sources": [
+    {
+      "id": "source-statement",
+      "kind": "statement",
+      "ref": "declared-task",
+      "note": "合成示例中的手工任务声明。",
+      "status": "attested",
+      "sha256": null
+    },
+    {
+      "id": "source-status",
+      "kind": "artifact",
+      "ref": "status.txt",
+      "note": "合成示例的本地状态文件。",
+      "status": "captured",
+      "sha256": "60d7e7a529715efe880c5495c2ab4324b7cdddd7da8ed2eb7d6295d6ae85d4ef"
+    }
+  ],
+  "ledger": [
+    {
+      "id": "goal-review-status",
+      "kind": "goal",
+      "text": "核对所列本地证据。",
+      "source_ids": [
+        "source-statement"
+      ],
+      "status": "active",
+      "supersedes": [],
+      "critical": false
+    },
+    {
+      "id": "constraint-status",
+      "kind": "constraint",
+      "text": "状态文件应包含 release.status=ready。",
+      "source_ids": [
+        "source-statement"
+      ],
+      "status": "active",
+      "supersedes": [],
+      "critical": true
+    }
+  ],
+  "probes": [
+    {
+      "id": "probe-status",
+      "item_id": "constraint-status",
+      "source_id": "source-status",
+      "rule": "contains",
+      "expected": "release.status=ready",
+      "result": "pass",
+      "detail": "Literal substring is present in the captured UTF-8 bytes."
+    }
+  ],
+  "observations": [],
+  "source": "codex-evidence-review",
+  "reviewed_at_ms": 1788652800000,
+  "report_id": "7e01d94431b651a9773243e460e2150faaefcc1717cae5a1e2194806ab0bab73"
+}

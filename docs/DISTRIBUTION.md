@@ -1,10 +1,10 @@
 # 分发与安装路径
 
-版本：0.2.0 · 2026-09-06
+版本：0.3.0 · 2026-09-06
 
 项目有两个独立交付物：桌面悬浮球应用与可选 Codex 插件。公开 GitHub 仓库让用户取得源码；插件目录让 Codex 发现技能和 hooks。安装插件本身不会自动安装或启动桌面应用。
 
-公开仓库为 [Arashi3516/codex-context-orb](https://github.com/Arashi3516/codex-context-orb)。0.2.0 交付源码、语义评估原型和插件开发包；尚无经过签名、验收的 Releases 安装包。
+公开仓库为 [Arashi3516/codex-context-orb](https://github.com/Arashi3516/codex-context-orb)。0.3.0 交付源码、任务账本与文件检查和插件开发包；尚无经过签名、验收的 Releases 安装包。
 
 ## 当前：从源码运行
 
@@ -15,7 +15,7 @@ npm ci
 npm run dev
 ```
 
-开发预览仅监听 `127.0.0.1:1427`。浏览器中的演示场景不读取真实会话，不代表实际前台跟随或语义分析已经可用。
+开发预览仅监听 `127.0.0.1:1427`。浏览器中的演示场景不读取真实会话，不代表实际前台跟随或自动语义诊断已经可用。
 
 本机桌面开发还需要 Rust 工具链与对应平台的 Tauri 构建依赖：
 
@@ -23,7 +23,7 @@ npm run dev
 npm run desktop:dev
 ```
 
-`npm run desktop:build` 是桌面构建入口。能在某台机器构建不代表生成了经过签名、公证或两个平台验收的安装包。0.2.0 的发布说明必须列出实际完成的平台与验证结果；没有产出的二进制不能出现在下载承诺中。
+`npm run desktop:build` 是桌面构建入口。能在某台机器构建不代表生成了经过签名、公证或两个平台验收的安装包。0.3.0 的发布说明必须列出实际完成的平台与验证结果；没有产出的二进制不能出现在下载承诺中。
 
 ## 可选插件：仓库内的独立包
 
@@ -38,6 +38,7 @@ npm run desktop:dev
 ```sh
 python3 plugins/codex-context-orb/scripts/test_hooks.py
 python3 plugins/codex-context-orb/scripts/test_assessments.py
+python3 plugins/codex-context-orb/scripts/test_evidence_review.py
 python3 plugins/codex-context-orb/scripts/inspect_events.py
 ```
 
@@ -53,7 +54,7 @@ Windows 将 `python3` 替换成 `py -3`。适配器只写自己的数据根。�
 | macOS | Apple Silicon | arm64 应用与磁盘镜像 | 实机运行、Developer ID 签名、公证、安装与更新 |
 | macOS | Intel | x64 应用与磁盘镜像 | 独立构建与实机验收、签名和公证 |
 
-这些是计划目标，不是 0.2.0 的下载清单。首个正式二进制版本应附可复核的源代码版本、校验和、已测 Codex 版本、已知限制和数据迁移说明。自动更新、自动启动、Python 捆绑或替代运行时都需要实现后才写入产品说明。
+这些是计划目标，不是 0.3.0 的下载清单。首个正式二进制版本应附可复核的源代码版本、校验和、已测 Codex 版本、已知限制和数据迁移说明。自动更新、自动启动、Python 捆绑或替代运行时都需要实现后才写入产品说明。
 
 ## 后续：官方插件目录
 

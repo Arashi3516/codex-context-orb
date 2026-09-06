@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "session_id": "fixture-evidence-session",
+  "turn_id": "fixture-evidence-turn",
+  "scope": {
+    "mode": "as_of",
+    "origin": "main",
+    "action_id": "action-check-status",
+    "goal_id": "goal-review-status",
+    "next_step": "核对本地状态文件中的发布标记。",
+    "coverage": "declared",
+    "unknowns": []
+  },
+  "sources": [
+    {"id": "source-statement", "kind": "statement", "ref": "declared-task", "note": "合成示例中的手工任务声明。"},
+    {"id": "source-status", "kind": "artifact", "ref": "status.txt", "note": "合成示例的本地状态文件。"}
+  ],
+  "ledger": [
+    {"id": "goal-review-status", "kind": "goal", "text": "核对所列本地证据。", "source_ids": ["source-statement"], "status": "active", "supersedes": [], "critical": false},
+    {"id": "constraint-status", "kind": "constraint", "text": "状态文件应包含 release.status=ready。", "source_ids": ["source-statement"], "status": "active", "supersedes": [], "critical": true}
+  ],
+  "probes": [
+    {"id": "probe-status", "item_id": "constraint-status", "source_id": "source-status", "rule": "contains", "expected": "release.status=ready"}
+  ],
+  "observations": []
+}

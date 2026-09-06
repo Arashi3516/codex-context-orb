@@ -1,0 +1,2 @@
+release.status=ready
+deployment=not_requested

@@ -2,7 +2,9 @@
 
 - Keep all work scoped to this repository. Never import private Codex transcripts or account credentials.
 - This is an unofficial, independent companion, not an OpenAI product.
-- Preserve UNKNOWN. Missing, invalid, stale or superseded semantic reviews cannot produce a healthy status.
+- Preserve UNKNOWN. Missing or invalid reports, unverified requirements, incomplete scope and hypotheses cannot produce an all-listed-checks-pass status.
+- Evidence v2 is always as-of. Later activity prompts a recheck; age and compaction count do not erase historical receipts or produce restart advice.
+- Separate declared requirements, captured file conditions and unverified observations. A literal check or valid report hash does not prove behavioral correctness or complete context integrity.
 - Capacity, turn count, duration and compaction count alone do not establish semantic degradation.
 - Never present latest activity as the foreground/selected session. Manual pinning must be labeled.
 - Keep demo fixtures, hook metadata, and user-requested semantic reviews distinguishable in types and UI.

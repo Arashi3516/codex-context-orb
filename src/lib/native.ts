@@ -1,4 +1,5 @@
 import type { ContextSnapshot, SemanticAssessment } from './context'
+import type { EvidenceReport } from './evidence'
 
 export const isNative = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
 
@@ -19,7 +20,7 @@ function sessionTitle(id: string) {
   return `会话 · ${id.length > 18 ? `${id.slice(0, 8)}…${id.slice(-6)}` : id}`
 }
 
-export function mergeLocalSessions(events: HookSnapshot[], reviews: SemanticAssessment[]): ContextSnapshot[] {
+export function mergeLocalSessions(events: HookSnapshot[], reviews: SemanticAssessment[], reports: EvidenceReport[] = []): ContextSnapshot[] {
   const merged = new Map<string, ContextSnapshot>()
   for (const event of events) {
     const existing = merged.get(event.session_id)
@@ -45,19 +46,39 @@ export function mergeLocalSessions(events: HookSnapshot[], reviews: SemanticAsse
       lastEvent: existing?.lastEvent, assessment: review,
     })
   }
+  for (const report of reports) {
+    const existing = merged.get(report.session_id)
+    if (existing?.report && existing.report.reviewed_at_ms >= report.reviewed_at_ms) continue
+    const hasHook = existing?.lastEvent !== undefined
+    merged.set(report.session_id, {
+      id: report.session_id, title: sessionTitle(report.session_id), source: 'codex-evidence-review',
+      model: existing?.model ?? null, observedAt: hasHook ? existing.observedAt : report.reviewed_at_ms,
+      turnId: hasHook ? existing.turnId : null, lastEvent: existing?.lastEvent,
+      usedTokens: null, windowTokens: null, compactions: null,
+      assessment: existing?.assessment, report,
+    })
+  }
   return [...merged.values()].sort((a, b) => b.observedAt - a.observedAt)
 }
 
 export async function readLocalSessions(pinnedId: string | null): Promise<ContextSnapshot[]> {
   if (!isNative) return []
   const { invoke } = await import('@tauri-apps/api/core')
-  const [events, reviews, pinnedEvents, pinnedReviews] = await Promise.all([
+  const [events, reviews, reports, pinnedEvents, pinnedReviews, pinnedReports] = await Promise.all([
     invoke<HookSnapshot[]>('read_hook_events', { sessionId: null }),
     invoke<SemanticAssessment[]>('read_semantic_assessments', { sessionId: null }),
+    invoke<EvidenceReport[]>('read_evidence_reports', { sessionId: null }),
     pinnedId ? invoke<HookSnapshot[]>('read_hook_events', { sessionId: pinnedId }) : [],
     pinnedId ? invoke<SemanticAssessment[]>('read_semantic_assessments', { sessionId: pinnedId }) : [],
+    pinnedId ? invoke<EvidenceReport[]>('read_evidence_reports', { sessionId: pinnedId }) : [],
   ])
-  return mergeLocalSessions([...events, ...pinnedEvents], [...reviews, ...pinnedReviews])
+  return mergeLocalSessions([...events, ...pinnedEvents], [...reviews, ...pinnedReviews], [...reports, ...pinnedReports])
+}
+
+export async function readEvidenceHistory(sessionId: string): Promise<EvidenceReport[]> {
+  if (!isNative) return []
+  const { invoke } = await import('@tauri-apps/api/core')
+  return invoke<EvidenceReport[]>('read_evidence_history', { sessionId })
 }
 
 export async function sizeOrbWindow(expanded: boolean) {

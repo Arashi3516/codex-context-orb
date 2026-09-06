@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$comment": "collect returns one EvidenceReport; validate returns ValidationReceipt; read returns EvidenceReport or null; history returns at most 8 EvidenceReports (524288 bytes plus at most 1024 bytes of framing). Each nested report has the 64 KiB limit and semantic validation described by its schema.",
+  "$defs": {
+    "EvidenceReport": {
+      "$ref": "evidence-report.schema.json"
+    },
+    "ValidationReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "valid",
+        "report_id"
+      ],
+      "properties": {
+        "valid": {
+          "const": true
+        },
+        "report_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "ReadResult": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/EvidenceReport"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "HistoryResult": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/EvidenceReport"
+      },
+      "minItems": 0,
+      "maxItems": 8
+    }
+  },
+  "anyOf": [
+    {
+      "$ref": "#/$defs/EvidenceReport"
+    },
+    {
+      "$ref": "#/$defs/ValidationReceipt"
+    },
+    {
+      "$ref": "#/$defs/ReadResult"
+    },
+    {
+      "$ref": "#/$defs/HistoryResult"
+    }
+  ]
+}

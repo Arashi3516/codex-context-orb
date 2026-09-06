@@ -1,32 +1,38 @@
 # 验证记录
 
-版本：0.2.0 · 2026-09-06
+版本：0.3.0 · 2026-09-06
 
-验证规则、本地存储通路和交互，不宣称真实任务准确率或自动监控已完成。
+验证实际文件检查、状态边界、存储通路与 UI，不宣称真实会话语义准确率或自动监控已完成。
 
 ## 本地结果
 
 | 检查 | 结果 |
 | --- | --- |
-| TypeScript 语义规则与会话合并 | 31/31 PASS |
+| TypeScript 报告规则、简报、渲染边界与会话合并 | 40/40 PASS |
 | Python hook 隐私、并发与错误边界 | 15/15 PASS |
-| Python 评估契约、锁、原子写入、CLI 与 UTF-8 | 15/15 PASS |
-| Rust 报告与快照的有界/精确读取 | 20/20 PASS |
-| Playwright 语义状态、依据、澄清、过期、复制、绑定、静音、主题与键盘 | 8/8 PASS |
+| Python 旧版评估兼容通路 | 15/15 PASS |
+| Python v2 同字节检查、拒绝伪造结果、UTF-8、锁、历史与 CLI | 19/19 PASS |
+| Rust v1/v2/hook 有界读取、精确身份、契约与哈希 | 30/30 PASS |
+| Playwright 状态、来源、作废、历史、复制、绑定、静音与键盘 | 10/10 PASS |
 | TypeScript + Vite 生产构建 | PASS |
+| macOS 本地开发包（debug .app，未签名公证验收） | PASS |
 | Plugin / skill 官方脚本结构验证 | PASS |
 | git diff --check | PASS |
 
-本地共 89 项测试通过，全部使用虚构数据或临时目录。31 项规则测试不构成真实提醒准确率证明。
+本地共 129 项测试通过，使用虚构数据和临时目录。Python、Rust、TypeScript 共用一份合成 v2 收据；这验证了契约互通，不证明真实客户端接入。
 
-视觉检查：1440×1000 浅色/深色、390×844 窄屏，以及 382×690 浏览器悬浮窗组件。检查无横向溢出、主操作可达、详情可滚动；浏览器组件截图不证明系统窗口行为。[预览](assets/design-preview.png) · [深色](assets/design-preview-dark.png) · [依据](assets/semantic-evidence.png) · [悬浮窗组件](assets/orb-surface.png)。
+独立演练按技能流程构造需求变更：旧条件文件检查 PASS → 新条件声明替代旧条件后 FAIL → 修改文件并重新采集后 PASS；无法用字面条件判断的交互要求始终 UNKNOWN。逐次读回核对会话与报告 ID，三份历史单独保留，其他会话读不到该报告。演练仅使用隔离的临时数据根。
 
-上一版 Windows CI 在并发 os.replace 时出现 WinError 5。本版加入限定 Windows 错误码的 150ms 有界重试，保留失败清理，未放宽隐私或 JSON 完整性检查。跨平台结果以对应代码提交的 [GitHub Checks](https://github.com/Arashi3516/codex-context-orb/actions/workflows/checks.yml) 为准。
+复核修复了简报遗漏有效事实/决策/进展和假设、旧观察回流当前待办，以及总览未直接展示未核验前提的问题。已作废条目不会重新成为有效检查；失败/未知状态不会显示通过卡。
 
-## 尚未完成
+视觉检查：1440×1000 深浅主题、390×844 窄屏及 382×690 浏览器悬浮窗组件。检查无横向溢出、操作可达、长详情可滚动。[预览](assets/design-preview.png) · [深色](assets/design-preview-dark.png) · [来源](assets/semantic-evidence.png) · [账本](assets/task-ledger.png) · [悬浮窗组件](assets/orb-surface.png)。
 
-尚未完成：真实 Codex 安装/trust、身份与 skill 写入到原生显示完整链；自动后台评估、系统通知、前台跟随；真实标注任务误报/漏报；Windows 真机与多显示器；签名公证和安装升级；官方目录审核。
+## 边界
+
+新版收据永远对应采集时点，不再使用 v0.2 的 20 分钟或后续 Stop 失效规则。之后的活动只提示复查。来源声明不是独立宿主取证，字面检查不是行为测试，报告哈希不是防篡改的真实性证明。
+
+本机结果不替代跨平台执行；对应提交的 macOS/Windows 框架检查与 Linux 浏览器检查以 [GitHub Checks](https://github.com/Arashi3516/codex-context-orb/actions/workflows/checks.yml) 为准。Windows 分享冲突重试与 reparse 处理有测试，但不声明能抵抗恶意并发目录替换的完整沙箱保证。
+
+尚未完成：真实 Codex 安装/trust、身份传递与原生显示完整链；自动语义诊断与 C/C+S/fresh+S 对照校准；后台模型复查、系统通知、前台自动跟随；Windows 真机、多显示器、签名公证、安装升级和官方目录审核。
 
 原生 UI 自动化受本机 macOS 系统权限限制，浏览器组件 QA 不能替代原生真机验收。
-
-正常 Stop 也会使评估退出当前判断；用户可回顾历史依据。自动化前需要更稳定的输入/压缩失效水位，以改善该保守策略的可用性。

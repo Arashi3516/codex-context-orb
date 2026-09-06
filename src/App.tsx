@@ -5,15 +5,16 @@ import {
   ChevronRight, CircleHelp, Copy, ExternalLink, Folder, Github, Info, Layers,
   LockKeyhole, Moon, MoreHorizontal, Pin, Plus, Settings2, ShieldCheck, Sun, X,
 } from 'lucide-react'
-import { createHandoffTemplate, createReviewPrompt, evaluateContext, resolvePinned, SIGNAL_LABELS } from './lib/context'
-import type { ContextSnapshot, HealthLevel } from './lib/context'
-import { demoSessions, DEMO_PRIMARY_ID } from './lib/demo'
-import { dragNativeWindow, isNative, readLocalSessions, sizeOrbWindow } from './lib/native'
+import { createHandoffTemplate, createReviewPrompt, describeProbe, evaluateContext, resolvePinned, SIGNAL_LABELS } from './lib/context'
+import type { ContextSnapshot } from './lib/context'
+import { ITEM_LABELS, RESULT_LABELS, RULE_LABELS, isEvidenceReport, type EvidenceReport } from './lib/evidence'
+import { demoReport, demoSessions, DEMO_PRIMARY_ID, type DemoScenario } from './lib/demo'
+import { dragNativeWindow, isNative, readEvidenceHistory, readLocalSessions, sizeOrbWindow } from './lib/native'
 
-type PanelView = 'overview' | 'sessions' | 'handoff' | 'settings' | 'evidence' | 'review'
+type PanelView = 'overview' | 'sessions' | 'handoff' | 'settings' | 'evidence' | 'review' | 'ledger' | 'history'
 const widgetSurface = isNative || new URLSearchParams(location.search).get('surface') === 'orb'
-const scenarioLabels: Record<HealthLevel, string> = {
-  healthy: '压缩后清晰', watch: '局部混杂', handoff: '建议新开', unknown: '证据不足',
+const scenarioLabels: Record<DemoScenario, string> = {
+  passed: '所列检查通过', failed: '发现约束偏差', superseded: '旧方案已作废', unknown: '关键证据缺失',
 }
 
 function readPreference(key: string, fallback: string) {
@@ -31,8 +32,8 @@ function OrbMark({ className = '' }: { className?: string }) {
 
 export default function App() {
   const [theme, setTheme] = useState(() => readPreference('orb:theme', 'light'))
-  const [scenario, setScenario] = useState<HealthLevel>('handoff')
-  const [sessions, setSessions] = useState<ContextSnapshot[]>(() => isNative ? [] : demoSessions('handoff'))
+  const [scenario, setScenario] = useState<DemoScenario>('failed')
+  const [sessions, setSessions] = useState<ContextSnapshot[]>(() => isNative ? [] : demoSessions('failed'))
   const [pinnedId, setPinnedId] = useState<string | null>(() => isNative ? readPreference('orb:pinned', '') || null : DEMO_PRIMARY_ID)
   const [expanded, setExpanded] = useState(!widgetSurface)
   const [view, setView] = useState<PanelView>('overview')
@@ -43,6 +44,10 @@ export default function App() {
   const [help, setHelp] = useState(false)
   const [backgroundCount, setBackgroundCount] = useState(0)
   const [connectionError, setConnectionError] = useState(false)
+  const [history, setHistory] = useState<EvidenceReport[]>([])
+  const [historyError, setHistoryError] = useState(false)
+  const [historyLoading, setHistoryLoading] = useState(false)
+  const [historicalReport, setHistoricalReport] = useState<EvidenceReport | null>(null)
   const [offset, setOffset] = useState({ x: 0, y: 0 })
   const orbRef = useRef<HTMLButtonElement>(null)
   const panelRef = useRef<HTMLElement>(null)
@@ -54,6 +59,9 @@ export default function App() {
   const snapshot = resolvePinned(sessions, pinnedId)
   const health = evaluateContext(snapshot, now)
   const assessment = snapshot?.assessment
+  const report = health.report
+  const displayedReport = historicalReport?.session_id === pinnedId ? historicalReport : report
+  const displayedHealth = displayedReport && snapshot ? evaluateContext({ ...snapshot, report: displayedReport }, now) : health
   const reviewPrompt = createReviewPrompt(isNative ? pinnedId : null)
   const snoozed = !!pinnedId && now < (snoozedSessions[pinnedId] ?? 0)
 
@@ -86,6 +94,21 @@ export default function App() {
     return () => { cancelled = true; window.clearInterval(timer) }
   }, [pinnedId])
   useEffect(() => {
+    if (view !== 'history' || !pinnedId) return
+    let cancelled = false
+    setHistory([])
+    setHistoryError(false)
+    setHistoryLoading(true)
+    const load = isNative ? readEvidenceHistory(pinnedId) : Promise.resolve(report ? [report,
+      { ...demoReport('passed', report.reviewed_at_ms - 15 * 60_000), session_id: pinnedId, report_id: 'e'.repeat(64) }] : [])
+    void load.then(items => {
+      if (cancelled) return
+      if (items.some(item => !isEvidenceReport(item) || item.session_id !== pinnedId)) throw new Error('Invalid history scope')
+      setHistory(items)
+    }).catch(() => { if (!cancelled) setHistoryError(true) }).finally(() => { if (!cancelled) setHistoryLoading(false) })
+    return () => { cancelled = true }
+  }, [view, pinnedId, report])
+  useEffect(() => {
     if (!isNative) return
     resizeQueue.current = resizeQueue.current.then(() => sizeOrbWindow(expanded)).catch(() => {
       setToast('窗口尺寸调整失败，可拖动悬浮球重新定位。')
@@ -108,11 +131,12 @@ export default function App() {
     return () => helpTriggerRef.current?.focus({ preventScroll: true })
   }, [help])
 
-  function chooseScenario(next: HealthLevel) {
+  function chooseScenario(next: DemoScenario) {
     setScenario(next)
     setSessions(demoSessions(next))
     setPinnedId(DEMO_PRIMARY_ID)
-    setView('overview')
+    setView(next === 'superseded' ? 'ledger' : 'overview')
+    setHistoricalReport(null)
     setExpanded(true)
     setSnoozedSessions({})
     setNow(Date.now())
@@ -126,6 +150,7 @@ export default function App() {
     setPinnedId(id)
     if (isNative) savePreference('orb:pinned', id)
     setView('overview')
+    setHistoricalReport(null)
   }
   function prepareHandoff() {
     setHandoff(createHandoffTemplate(snapshot))
@@ -141,15 +166,13 @@ export default function App() {
   }
   function simulateClarification() {
     if (isNative) return
-    setSessions(current => current.map(item => item.id !== pinnedId || !item.assessment ? item : {
-      ...item, assessment: { ...item.assessment, reviewed_at_ms: Date.now(),
-        signals: item.assessment.signals.map(signal => ({ ...signal, status: 'resolved' })),
-        review_note: '演示复查：已重新确认主动保存约束，最近修改已恢复一致；旧冲突不再计入提醒。',
-      },
+    setSessions(current => current.map(item => item.id !== pinnedId || !item.report ? item : {
+      ...item, report: { ...demoReport('passed'), session_id: item.id, turn_id: item.report.turn_id },
     }))
-    setScenario('healthy')
+    setScenario('passed')
+    setHistoricalReport(null)
     setView('overview')
-    setToast('已模拟澄清与复查。已解决的问题不再触发建议。')
+    setToast('已模拟修改文件并重新采集。所列检查通过，新开收益仍未评估。')
   }
   function snooze() {
     if (!pinnedId) return
@@ -202,10 +225,10 @@ export default function App() {
       role="dialog" aria-label="会话状态" onKeyDown={event => { if (event.key === 'Escape') closePanel() }}
     >
       <header className="panel-top">
-        <div className="panel-brand"><OrbMark /><span>Context Orb</span><span className="version-pill">v0.2 预览</span></div>
+        <div className="panel-brand"><OrbMark /><span>Context Orb</span><span className="version-pill">v0.3 预览</span></div>
         <button className="icon-button" aria-label="收起面板" onClick={closePanel}><X size={17} /></button>
       </header>
-      {view !== 'overview' && <button className="back-button" onClick={() => setView('overview')}><ArrowLeft size={14} />返回概览</button>}
+      {view !== 'overview' && <button className="back-button" onClick={() => { setView('overview'); setHistoricalReport(null) }}><ArrowLeft size={14} />返回概览</button>}
       {view === 'overview' && <>
         <button className="session-binding" onClick={() => setView('sessions')} aria-label="选择固定会话">
           <span className="binding-icon"><Pin size={14} /></span>
@@ -218,73 +241,113 @@ export default function App() {
           <p>{health.description}</p>
         </div>
         <div className="semantic-card" data-testid="semantic-card">
-          <div className="semantic-card-label"><span>压缩后的执行脉络</span><span className="source-label">{snapshot?.source === 'demo' ? '模拟评估' : assessment ? 'Codex 手动评估' : '尚未评估'}</span></div>
-          {health.level !== 'unknown' && assessment ? <>
-            <div className="semantic-facts"><div><strong>{assessment.compactions_observed ?? '—'}<span> 次</span></strong><small>已观察的压缩</small></div><span className="fact-separator" /><div><strong>{health.actionable.length}<span> 项</span></strong><small>影响下一步的疑点</small></div></div>
-            {health.actionable.length ? <div className="signal-previews">{health.actionable.slice(0, 2).map(signal => <div className="signal-preview" key={signal.id}><i /><span>{SIGNAL_LABELS[signal.kind]}</span><small>{signal.recurrence === 'after_correction' ? '纠正后再次出现' : '仍待核对'}</small></div>)}</div>
-              : <div className="clear-result"><ShieldCheck size={16} /><span>当前目标、约束与有效结论保持一致</span></div>}
-            <button className="evidence-link" onClick={() => setView('evidence')}>查看评估依据<ArrowUpRight size={14} /></button>
-          </> : <div className="review-empty"><CircleHelp size={24} /><strong>等待一次有依据的检查</strong><p>核对当前目标、有效约束，以及压缩后的执行是否仍然一致。</p>{assessment && <button className="evidence-link" onClick={() => setView('evidence')}>回顾上次评估依据<ArrowUpRight size={14} /></button>}</div>}
+          <div className="semantic-card-label"><span>下一步的检查依据</span><span className="source-label">{snapshot?.source === 'demo' ? '模拟收据' : report ? '本地文件检查' : '尚未收集'}</span></div>
+          {report ? <>
+            <div className="semantic-facts"><div><strong>{health.checks.passed + health.checks.failed}<span> 项</span></strong><small>已完成文件检查</small></div><span className="fact-separator" /><div><strong>{health.checks.failed + health.checks.unknown}<span> 项</span></strong><small>失败或未知的检查</small></div></div>
+            {report.probes.some(probe => probe.result !== 'pass') ? <div className="signal-previews">{report.probes.filter(probe => probe.result !== 'pass').slice(0, 2).map(probe => <div className="signal-preview" key={probe.id}><i /><span>{describeProbe(report, probe)}</span><small>{RESULT_LABELS[probe.result]}</small></div>)}</div>
+              : !health.unresolved.length && <div className="clear-result"><ShieldCheck size={16} /><span>所列条件在采集的文件版本中通过</span></div>}
+            {!!health.unresolved.length && <p className="overview-gap">待补齐：{health.unresolved[0]}</p>}
+            <div className="overview-links"><button className="evidence-link" onClick={() => { setHistoricalReport(null); setView('evidence') }}>查看检查与来源<ArrowUpRight size={14} /></button>
+            <button className="evidence-link" onClick={() => { setHistoricalReport(null); setView('ledger') }}>查看任务账本<ChevronRight size={14} /></button></div>
+          </> : <div className="review-empty"><CircleHelp size={24} /><strong>等待一次有依据的检查</strong><p>声明有效要求，检查明确选定的文件。无法验证的前提继续标为未知。</p>{assessment && <button className="evidence-link" onClick={() => setView('evidence')}>回顾旧版评估<ArrowUpRight size={14} /></button>}</div>}
         </div>
-        {health.level === 'unknown' ? <div className="quiet-note"><Info size={16} /><p>{connectionError ? '本地评估暂不可读，请检查接入配置。' : '首版由你在目标 Codex 会话中发起评估；悬浮球读取本地结果。'}</p></div>
-          : <div className="quiet-note"><ShieldCheck size={16} /><p>{health.level === 'handoff' ? '先提取仍有效的信息，再继续下一步。' : '问题澄清后可以继续，压缩本身不触发换会话。'}<br /><span>结果反映本次评估，非实时质量保证。</span></p></div>}
+        <div className="quiet-note"><Info size={16} /><p>{connectionError ? '本地报告暂不可读，请检查接入配置。' : report ? '截至本次采集 · 新开收益尚未评估' : '由你在目标会话发起收集，悬浮球展示本地结果。'}<br /><span>{health.notices[1] ?? (report ? '文件检查结果不代表整个上下文已被验证。' : '声明来源、实际检查与未知项分别保留。')}</span></p></div>
         <div className="panel-actions">
-          <button className="primary-button" onClick={health.level === 'unknown' ? () => setView('review') : prepareHandoff}>
-            {health.level === 'unknown' ? '准备语义评估' : '整理干净交接'}<ArrowUpRight size={16} />
+          <button className="primary-button" onClick={!report ? () => setView('review') : prepareHandoff}>
+            {!report ? '准备证据检查' : '整理下一步简报'}<ArrowUpRight size={16} />
           </button>
           <button className="secondary-button" disabled={!snapshot} onClick={snooze}><BellOff size={14} />稍后提醒</button>
         </div>
-        <footer className="panel-footer"><span><i />{health.reviewedAt ? `${isNative ? '评估于' : '演示评估'} ${new Date(health.reviewedAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}` : '等待本地评估'}</span><button onClick={() => setView('settings')} aria-label="提醒设置"><Settings2 size={14} />设置</button></footer>
+        <footer className="panel-footer"><span><i />{health.reviewedAt !== null ? `${isNative ? '采集于' : '演示采集'} ${new Date(health.reviewedAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}` : '等待本地报告'}</span><button onClick={() => setView('settings')} aria-label="提醒设置"><Settings2 size={14} />设置</button></footer>
       </>}
       {view === 'sessions' && <div className="subview">
         <h2>只关注，你选中的会话</h2><p className="subview-intro">手动固定一个会话。后台任务的更新不会自动切换它。</p>
         <div className="session-list">
           {sessions.map(item => <button className={`session-option ${pinnedId === item.id ? 'selected' : ''}`} key={item.id} title={item.id} aria-label={`${item.title} · ${item.id}`} onClick={() => pinSession(item.id)}>
-            <span className="session-avatar"><Layers size={17} /></span><span><strong>{item.title}</strong><small>{item.source === 'demo' ? '演示会话' : item.assessment ? '已有手动语义评估' : '已收到生命周期事件'}</small></span>{pinnedId === item.id ? <Check size={17} /> : <ChevronRight size={15} />}
+            <span className="session-avatar"><Layers size={17} /></span><span><strong>{item.title}</strong><small>{item.source === 'demo' ? '演示会话' : item.report ? '已有文件检查收据' : item.assessment ? '仅有旧版评估' : '已收到生命周期事件'}</small></span>{pinnedId === item.id ? <Check size={17} /> : <ChevronRight size={15} />}
           </button>)}
-          {sessions.length === 0 && <div className="empty-state"><Layers size={28} /><strong>等待第一份评估</strong><p>启用仓库插件后，在目标 Codex 会话中请求 context-health 评估。</p><button className="text-button" onClick={() => setView('review')}>准备评估指令</button></div>}
+          {sessions.length === 0 && <div className="empty-state"><Layers size={28} /><strong>等待第一份检查</strong><p>启用仓库插件后，在目标 Codex 会话中请求 context-health 检查。</p><button className="text-button" onClick={() => setView('review')}>准备检查指令</button></div>}
         </div>
         {pinnedId && <button className="text-button" onClick={() => { setPinnedId(null); if (isNative) savePreference('orb:pinned', ''); setView('overview') }}>解除固定</button>}
-        <p className="micro-note"><Info size={13} />自动跟随当前窗口仍在验证中。</p>
+        <p className="micro-note"><Info size={13} />当前版本需要手动固定会话。</p>
       </div>}
       {view === 'evidence' && <div className="subview evidence-view">
-        <span className={`status-chip status-${health.level}`}><i />{health.label}</span>
-        <h2>{health.level === 'unknown' ? '上次评估，仅供回顾' : '为什么这样建议'}</h2><p className="subview-intro">{health.level === 'unknown' ? '这份报告不能代表当前执行状态。核对新的输入与进展后，再作决定。' : '逐项核对实际影响。已解决的问题与正常需求调整，不应继续触发提醒。'}</p>
-        {assessment && <p className="review-note">评估时间：{new Date(assessment.reviewed_at_ms).toLocaleString('zh-CN')}</p>}
-        <div className="review-goal"><small>当前目标</small><p>{assessment?.current_goal ?? '待确认'}</p></div>
-        <div className="evidence-list">{assessment?.signals.map(signal => <article className={`evidence-item ${signal.status === 'resolved' ? 'resolved' : ''}`} key={signal.id}>
-          <header><strong>{SIGNAL_LABELS[signal.kind]}</strong><span>{signal.status === 'resolved' ? '已澄清' : '待处理'}</span></header><p>{signal.summary}</p>
-          <div className="evidence-tags"><span>{signal.after_compaction ? '压缩后观察' : '较早记录'}</span><span>{signal.affects_next_step ? '影响下一步' : '暂不影响执行'}</span>{signal.recurrence === 'after_correction' && <span>纠正后复现</span>}</div>
-          <ol>{signal.evidence.map((item, index) => <li key={`${item.ref}-${index}`}><small>{item.ref}</small><p>{item.note}</p></li>)}</ol>
-        </article>)}</div>
-        {!assessment?.signals.length && <div className="clear-result evidence-clear"><ShieldCheck size={22} /><span>本次评估未发现仍影响执行的冲突。</span></div>}
-        <p className="review-note">{assessment?.review_note}</p>
-        {!isNative && health.actionable.length > 0 && <button className="secondary-button full-width" onClick={simulateClarification}>模拟澄清并复查<Check size={15} /></button>}
-        <button className="text-button review-again" onClick={() => setView('review')}>准备重新评估<ChevronRight size={14} /></button>
+        <span className="status-chip status-unknown"><i />{historicalReport ? '历史收据' : '截至采集时点'}</span>
+        <h2>{displayedReport ? '每项结果，都有依据' : '旧版评估，仅供回顾'}</h2>
+        <p className="subview-intro">{displayedReport ? '文字检查只验证声明的条件。原始要求由评估者整理，文件版本通过本地读取记录。' : '旧版主观评估不再产生健康或新开建议。请准备新的来源账本与文件检查。'}</p>
+        {displayedReport ? <>
+          <p className="review-note">采集于 {new Date(displayedReport.reviewed_at_ms).toLocaleString('zh-CN')}<br />版本 {displayedReport.report_id.slice(0, 12)}</p>
+          <div className="review-goal"><small>这次要做什么</small><p>{displayedReport.scope.next_step}</p></div>
+          <div className="evidence-list">{displayedReport.probes.map(probe => <article className={`evidence-item probe-${probe.result}`} key={probe.id}>
+            <header><strong>{RULE_LABELS[probe.rule]}</strong><span>{RESULT_LABELS[probe.result]}</span></header>
+            <p>{describeProbe(displayedReport, probe)}</p>
+            {probe.expected && <code className="probe-expected">{probe.expected}</code>}
+            <p className="probe-detail">{probe.detail}</p>
+            <small className="source-ref">{displayedReport.sources.find(source => source.id === probe.source_id)?.ref ?? '未进行自动文件检查'}</small>
+          </article>)}</div>
+          {!!displayedHealth.unresolved.length && <div className="unresolved-card"><strong>仍需补齐</strong><ul>{displayedHealth.unresolved.map(item => <li key={item}>{item}</li>)}</ul></div>}
+          <h3 className="evidence-section-title">来源与版本</h3>
+          <div className="source-list">{displayedReport.sources.map(source => <article className="source-item" key={source.id}>
+            <header><strong>{source.ref}</strong><span>{source.status === 'captured' ? '已采集文件' : source.status === 'attested' ? '评估者声明' : '不可读取'}</span></header>
+            <p>{source.note}</p>{source.sha256 && <code title={source.sha256}>SHA-256 {source.sha256}</code>}
+          </article>)}</div>
+          {!!displayedReport.observations.length && <><h3 className="evidence-section-title">评估者记录 · 尚非独立验证</h3>{displayedReport.observations.map(item => {
+            const atom = displayedReport.ledger.find(entry => entry.id === item.item_id)!
+            return <div className="recorded-observation" key={item.id}><strong>{SIGNAL_LABELS[item.kind]}</strong><p>{item.summary}</p>
+              <small>关联：{atom.text} · {atom.status === 'superseded' ? '已作废，不参与当前判断' : atom.status === 'hypothesis' ? '待验证假设' : '本次有效'}</small>
+              <p><small>{item.status === 'resolved' ? '记录为已解决' : '记录为未解决'}{item.recurrence === 'after_correction' && ' · 记录为纠正后复发'}<br />来源：{item.source_ids.map(id => displayedReport.sources.find(source => source.id === id)?.ref ?? id).join('；')}</small></p></div>
+          })}</>}
+          <button className="text-button review-again" onClick={() => setView('ledger')}>查看此报告的账本<ChevronRight size={14} /></button>
+          {!isNative && !historicalReport && health.checks.failed > 0 && <button className="secondary-button full-width" onClick={simulateClarification}>模拟修改并重新采集<Check size={15} /></button>}
+          <button className="text-button review-again" onClick={() => setView('history')}>查看采集历史<ChevronRight size={14} /></button>
+        </> : assessment && <>
+          <p className="review-note">旧版评估于 {new Date(assessment.reviewed_at_ms).toLocaleString('zh-CN')}</p>
+          <div className="review-goal"><small>当时的目标</small><p>{assessment.current_goal}</p></div>
+          {assessment.signals.map(signal => <article className="evidence-item" key={signal.id}><strong>{SIGNAL_LABELS[signal.kind]}</strong><p>{signal.summary}</p></article>)}
+        </>}
+        <button className="text-button review-again" onClick={() => setView('review')}>准备重新收集<ChevronRight size={14} /></button>
+      </div>}
+      {view === 'ledger' && <div className="subview ledger-view">
+        <span className="status-chip status-unknown"><i />{historicalReport ? '历史账本' : '声明的任务范围'}</span><h2>留下有效的，标明作废的</h2>
+        <p className="subview-intro">每个条目保留来源和变更关系。这份账本由评估者整理，不代表插件已经独立读取全部原始要求。</p>
+        {displayedReport?.ledger.map(item => <article className={`ledger-item ledger-${item.status}`} key={item.id}>
+          <header><strong>{ITEM_LABELS[item.kind]}</strong><span>{item.status === 'superseded' ? '已作废' : item.status === 'hypothesis' ? '待验证假设' : '本次有效'}{item.critical && ' · 关键'}</span></header><p>{item.text}</p>
+          <small>{item.source_ids.map(id => displayedReport.sources.find(source => source.id === id)?.ref ?? id).join('；')}</small>
+          {!!item.supersedes.length && <p className="supersession-note">替代：{item.supersedes.map(id => displayedReport.ledger.find(previous => previous.id === id)?.text ?? id).join('；')}</p>}
+        </article>)}
+        <button className="text-button review-again" onClick={() => setView('evidence')}>查看检查与来源<ChevronRight size={14} /></button>
+      </div>}
+      {view === 'history' && <div className="subview history-view">
+        <h2>每次采集，单独保留</h2><p className="subview-intro">最多保留最近 8 份收据。历史结果只对应当时的文件与声明范围。</p>
+        {historyLoading && <p role="status">正在读取历史…</p>}{historyError && <p role="alert">历史暂不可读，请重新收集或检查本地目录。</p>}
+        {!historyLoading && !historyError && history.length === 0 && <p>尚无历史收据。</p>}
+        <div className="history-list">{history.map(item => <button className="history-item" key={item.report_id} onClick={() => { setHistoricalReport(item); setView('evidence') }}>
+          <span><strong>{new Date(item.reviewed_at_ms).toLocaleString('zh-CN')}</strong><small>{item.probes.length} 项检查 · {item.report_id.slice(0, 12)}</small></span><ChevronRight size={16} />
+        </button>)}</div>
       </div>}
       {view === 'review' && <div className="subview handoff-view">
-        <span className="status-chip status-unknown"><i />由你发起</span><h2>检查这段思路</h2>
+        <span className="status-chip status-unknown"><i />由你发起</span><h2>准备有来源的检查</h2>
         <p className="subview-intro">在目标 Codex 会话中发送这段指令。需要先启用仓库提供的 context-health 插件。</p>
-        <label className="sr-only" htmlFor="review-text">语义评估指令</label><textarea id="review-text" readOnly value={reviewPrompt} />
-        <button className="primary-button full-width" onClick={() => void copyText(reviewPrompt, '已复制。请在要检查的 Codex 会话中发送；评估尚未运行。')}><Copy size={15} />复制评估指令</button>
-        <p className="micro-note">评估结果会保存最小化的本地摘要与证据位置。悬浮球会读取结果；当前尚无自动后台评估。</p>
+        <label className="sr-only" htmlFor="review-text">证据检查指令</label><textarea id="review-text" readOnly value={reviewPrompt} />
+        <button className="primary-button full-width" onClick={() => void copyText(reviewPrompt, '已复制。请在目标 Codex 会话中发送；检查尚未运行。')}><Copy size={15} />复制检查指令</button>
+        <p className="micro-note">保存声明的要求、文件版本和检查结果。收集器只读取明确选定的工作区文件，不读取私有转录或调用额外模型。</p>
       </div>}
       {view === 'handoff' && <div className="subview handoff-view">
-        <span className="status-chip status-healthy"><i />只带走有效信息</span>
-        <h2>把思路，重新理清</h2>
-        <p className="subview-intro">保留当前目标、有效约束与已验证结论。先解决冲突，再把干净的下一步交给新会话。</p>
-        <label className="sr-only" htmlFor="handoff-text">交接摘要模板</label>
+        <span className="status-chip status-unknown"><i />新开收益尚未评估</span>
+        <h2>让下一步有据可循</h2>
+        <p className="subview-intro">这份简报也可用于原会话内纠正。先核对要求、未知项和文件版本，再决定在哪继续。</p>
+        <label className="sr-only" htmlFor="handoff-text">下一步任务简报</label>
         <textarea id="handoff-text" value={handoff} onChange={event => setHandoff(event.target.value)} spellCheck={false} />
-        <button className="primary-button full-width" onClick={() => void copyText(handoff, '已复制。核实有效信息后，粘贴到新会话。')}><Copy size={15} />复制交接模板</button>
-        <p className="micro-note">复制后由你开启新会话；当前任务继续保留。</p>
+        <button className="primary-button full-width" onClick={() => void copyText(handoff, '已复制。可先在原会话核对并纠正；新开收益尚未评估。')}><Copy size={15} />复制任务简报</button>
+        <p className="micro-note">检查收据只对应采集时点；目标或文件改变后需要重新核验。</p>
       </div>}
       {view === 'settings' && <div className="subview">
         <h2>恰好够用的提醒</h2><p className="subview-intro">让信息可见，让注意力留在工作上。</p>
         <div className="setting-row"><div><strong>外观</strong><small>与你的工作环境协调</small></div><button className="theme-toggle" onClick={() => setTheme(theme === 'light' ? 'dark' : 'light')} aria-label="切换面板主题">{theme === 'light' ? <Moon size={17} /> : <Sun size={17} />}</button></div>
         <div className="setting-row"><div><strong>稍后提醒</strong><small>{snoozed ? '此会话已暂停 10 分钟' : '需要安静时，暂停 10 分钟'}</small></div><button className="text-button" disabled={!snapshot} onClick={() => { if (snoozed && pinnedId) { setSnoozedSessions(current => ({ ...current, [pinnedId]: 0 })); setToast('此会话提醒已恢复。') } else snooze() }}>{snoozed ? '恢复' : '暂停'}</button></div>
-        <div className="setting-row"><div><strong>提醒依据</strong><small>压缩后反复出现、仍影响执行的问题</small></div><button className="text-button" onClick={() => setView('review')}>复查</button></div>
-        <div className="privacy-card"><LockKeyhole size={18} /><strong>保留依据，减少冗余</strong><p>悬浮球不上传对话。手动评估只保存必要的本地摘要与证据位置，未知信息继续标为未知。</p></div>
-        <p className="micro-note">自动后台评估与系统通知待接入。当前展示有时效的手动评估结果，规则准确率尚未在真实任务中校准。</p>
+        <div className="setting-row"><div><strong>检查依据</strong><small>声明的条件与采集的文件版本</small></div><button className="text-button" onClick={() => setView('review')}>复查</button></div>
+        <div className="privacy-card"><LockKeyhole size={18} /><strong>保留依据，减少冗余</strong><p>本地保存任务条目、来源位置和检查收据，不上传对话。文件检查由你发起，未知信息继续标为未知。</p></div>
+        <p className="micro-note">当前仅显示采集时点的结果。自动语义检测、系统通知与新开收益校准仍待验证。</p>
       </div>}
     </section>}
     <div className="orb-bottom-row">
@@ -315,23 +378,23 @@ export default function App() {
     </header>
     <main className="studio-main">
       <section className="intro">
-        <div className="eyebrow"><span />WHEN CONTEXT LOSES THE THREAD</div>
+        <div className="eyebrow"><span />EVIDENCE FOR YOUR NEXT STEP</div>
         <h1>专注，<br />让思路<span className="serif-word">清楚。</span></h1>
-        <p className="intro-copy">多次压缩之后，思路还清楚吗？<br />当旧信息开始干扰下一步，轻轻提醒你。</p>
-        <div className="platform-row"><span><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M13.4 3.7c.8-1 1-2 .9-2.7-1 .1-2.1.6-2.8 1.5-.7.8-1 1.9-.9 2.7 1 .1 2-.5 2.8-1.5ZM16.9 14.2c-.4.9-.6 1.3-1.1 2.1-.7 1-1.6 2.4-2.8 2.4-1.1 0-1.4-.7-2.9-.7s-1.8.7-2.9.7c-1.2 0-2-1.2-2.7-2.2C2.5 13.6 2 9.7 3.3 7.7c.9-1.4 2.3-2.1 3.6-2.1 1.2 0 2 .7 3 .7s1.6-.7 3-.7c1.1 0 2.4.6 3.3 1.7-2.9 1.6-2.4 5.6.7 6.9Z" fill="currentColor"/></svg>macOS</span><span><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m2 4 7-1v6H2V4Zm8-1.2L18 2v7h-8V2.8ZM2 10h7v6l-7-1v-5Zm8 0h8v7l-8-1v-6Z" fill="currentColor"/></svg>Windows</span><span className="platform-stage">框架 v0.2</span></div>
+        <p className="intro-copy">留下有效的要求，核对这一步的依据。<br />让旧说法有去处，让下一步看得清。</p>
+        <div className="platform-row"><span><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M13.4 3.7c.8-1 1-2 .9-2.7-1 .1-2.1.6-2.8 1.5-.7.8-1 1.9-.9 2.7 1 .1 2-.5 2.8-1.5ZM16.9 14.2c-.4.9-.6 1.3-1.1 2.1-.7 1-1.6 2.4-2.8 2.4-1.1 0-1.4-.7-2.9-.7s-1.8.7-2.9.7c-1.2 0-2-1.2-2.7-2.2C2.5 13.6 2 9.7 3.3 7.7c.9-1.4 2.3-2.1 3.6-2.1 1.2 0 2 .7 3 .7s1.6-.7 3-.7c1.1 0 2.4.6 3.3 1.7-2.9 1.6-2.4 5.6.7 6.9Z" fill="currentColor"/></svg>macOS</span><span><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m2 4 7-1v6H2V4Zm8-1.2L18 2v7h-8V2.8ZM2 10h7v6l-7-1v-5Zm8 0h8v7l-8-1v-6Z" fill="currentColor"/></svg>Windows</span><span className="platform-stage">框架 v0.3</span></div>
         <div className="scenario-controls">
           <div className="section-label"><span>试试四种状态</span><span>01 — 04</span></div>
           <div className="scenario-grid" role="group" aria-label="演示状态">
-            {(Object.keys(scenarioLabels) as HealthLevel[]).map((level, index) => <button key={level} className={`scenario-button level-${level} ${scenario === level ? 'active' : ''}`} aria-pressed={scenario === level} onClick={() => chooseScenario(level)}><span className="scenario-indicator" /><span>{scenarioLabels[level]}</span><small>0{index + 1}</small></button>)}
+            {(Object.keys(scenarioLabels) as DemoScenario[]).map((level, index) => <button key={level} className={`scenario-button level-${level === 'failed' ? 'watch' : level === 'unknown' ? 'unknown' : 'healthy'} ${scenario === level ? 'active' : ''}`} aria-pressed={scenario === level} onClick={() => chooseScenario(level)}><span className="scenario-indicator" /><span>{scenarioLabels[level]}</span><small>0{index + 1}</small></button>)}
           </div>
         </div>
-        <div className="design-principle"><span className="principle-line" /><p>留下有效信息，让下一步清楚。<br /><span>根据执行证据，决定交接时机。</span></p></div>
+        <div className="design-principle"><span className="principle-line" /><p>声明、检查、未知，分别保留。<br /><span>先核对，再决定怎样继续。</span></p></div>
       </section>
       <section className="workspace-stage" ref={stageRef} aria-label="悬浮球交互预览">
         <div className="stage-caption"><span className="stage-live-dot" />你的工作空间<span>示意场景 · 非真实会话</span></div>
         <div className="mock-window" aria-hidden="true">
           <div className="mock-window-bar"><div className="traffic-lights"><i /><i /><i /></div><span>studio / atlas</span><MoreHorizontal size={16} /></div>
-          <div className="mock-window-content"><aside className="mock-sidebar"><div className="mock-project"><Folder size={15} />atlas</div><div className="mock-new"><Plus size={14} />新会话</div><small>进行中</small><div className="mock-selected">设置页交互优化</div><div>API 重试边界检查</div><small>工作空间</small><div className="mock-file"><Folder size={13} />src</div><div className="mock-file nested">components</div><div className="mock-file nested">settings.tsx</div></aside><div className="mock-conversation"><div className="mock-thread-title">设置页交互优化<span>本地</span></div><div className="mock-user">把设置页的交互再收敛一下。</div><div className="mock-assistant"><span className="tiny-orb"><OrbMark /></span><div><strong>先让主操作更容易被找到。</strong><p>统一设置项的层级，保留清晰的反馈。<br />完成当前步骤后，再检查键盘导航。</p><div className="mock-code"><span><i>01</i><b>const</b> preferences = &#123;</span><span><i>02</i>&nbsp; theme: <em>'auto'</em>,</span><span><i>03</i>&nbsp; notifications: <em>'quiet'</em></span><span><i>04</i>&#125;</span></div><div className="mock-done"><Check size={13} />已整理当前交互</div></div></div><div className="mock-composer">继续这段工作…<span>↵</span></div></div></div>
+          <div className="mock-window-content"><aside className="mock-sidebar"><div className="mock-project"><Folder size={15} />atlas</div><div className="mock-new"><Plus size={14} />新会话</div><small>进行中</small><div className="mock-selected">设置页交互优化</div><div>设置页验证（后台）</div><small>工作空间</small><div className="mock-file"><Folder size={13} />src</div><div className="mock-file nested">components</div><div className="mock-file nested">settings.tsx</div></aside><div className="mock-conversation"><div className="mock-thread-title">设置页交互优化<span>本地</span></div><div className="mock-user">把设置页的交互再收敛一下。</div><div className="mock-assistant"><span className="tiny-orb"><OrbMark /></span><div><strong>先让主操作更容易被找到。</strong><p>统一设置项的层级，保留清晰的反馈。<br />完成当前步骤后，再检查键盘导航。</p><div className="mock-code"><span><i>01</i><b>const</b> preferences = &#123;</span><span><i>02</i>&nbsp; theme: <em>'auto'</em>,</span><span><i>03</i>&nbsp; notifications: <em>'quiet'</em></span><span><i>04</i>&#125;</span></div><div className="mock-done"><Check size={13} />已整理当前交互</div></div></div><div className="mock-composer">继续这段工作…<span>↵</span></div></div></div>
         </div>
         <div className="ambient-note"><span className="ambient-rule" /><span>需要时，<br />它就在这里。</span></div>
         {orb}
@@ -349,6 +412,6 @@ export default function App() {
         if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus() }
         else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus() }
       }
-    }}><button className="icon-button modal-close" onClick={() => setHelp(false)} aria-label="关闭设计说明"><X size={18} /></button><OrbMark /><h2 id="help-title">让下一步，重新清楚。</h2><p>这里演示多次压缩后的语义完整性检查。所有会话与证据均为虚构，可查看原因、模拟澄清并准备干净交接。</p><ul><li><strong>先看实际影响：</strong>旧指令、遗漏约束与冲突事实是否仍在干扰执行。</li><li><strong>再看能否恢复：</strong>单次偏差先澄清，纠正后仍反复出现才提高提醒。</li><li><strong>保留选择权：</strong>长会话可以继续，建议可以推迟，新会话由你开启。</li></ul><button className="primary-button full-width" onClick={() => setHelp(false)}>开始体验<ChevronRight size={16} /></button></section></div>}
+    }}><button className="icon-button modal-close" onClick={() => setHelp(false)} aria-label="关闭设计说明"><X size={18} /></button><OrbMark /><h2 id="help-title">让下一步，重新清楚。</h2><p>这里演示有来源的任务账本和文件检查。所有会话与收据均为虚构，可查看检查、作废关系和历史版本。</p><ul><li><strong>来源分开：</strong>声明的要求、实际读取的文件与未知项各自保留。</li><li><strong>范围明确：</strong>结果只反映采集时点，文件和目标变化后需要复查。</li><li><strong>保留选择权：</strong>同一份简报可留在原会话使用，新开收益尚未评估。</li></ul><button className="primary-button full-width" onClick={() => setHelp(false)}>开始体验<ChevronRight size={16} /></button></section></div>}
   </div>
 }

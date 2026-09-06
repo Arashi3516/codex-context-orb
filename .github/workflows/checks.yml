@@ -26,6 +26,7 @@ jobs:
       - run: npm run check
       - run: python plugins/codex-context-orb/scripts/test_hooks.py
       - run: python plugins/codex-context-orb/scripts/test_assessments.py
+      - run: python plugins/codex-context-orb/scripts/test_evidence_review.py
       - run: cargo test --manifest-path src-tauri/Cargo.toml --locked
   browser:
     runs-on: ubuntu-latest
