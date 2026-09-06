@@ -40,8 +40,12 @@
 | 当前身份 | 从当前运行环境取得完整 `CODEX_THREAD_ID`；当前 turn ID 缺失，保存为 null |
 | 真实采集 | 明确选择本仓库两个文件；2 个字面检查 PASS，3 个人工检查 UNKNOWN |
 | 三端读取 | 收集器回读、已安装插件 doctor、原生程序的实际读取函数均返回相同的会话与报告 ID；历史包含同一收据 |
-| 宿主 hook | 目标快照 ABSENT；安装结果不证明 trust 或自然 dispatch |
-| 原生 IPC / 界面 | 未验收；诊断命令未启动或操作 WebView |
+| hook 信任 | 用户在 CLI 完成信任；未由诊断脚本读取或修改 trust 配置 |
+| 宿主 hook | 信任后一个新任务产生 Stop 快照，完整会话 ID、turn ID 与宿主任务状态相同，时间与任务完成时点吻合；未手工调用适配器生成事件 |
+| 原生 hook 读取 | Python/原生读取和会话列表均识别新任务；后台更新未切换原先固定的会话。原会话本次仍未观测到 hook |
+| macOS 原生界面 | PASS：真实 `tauri://localhost` 窗口手动固定完整目标 ID，显示本地文件检查、2 项通过、3 项待核验和采集时点 |
+| 来源与历史 | PASS：界面中的收据版本前缀、两个文件哈希、检查条件和一份历史记录与实际收据一致 |
+| 原生 IPC | 通过真实 WebView 显示验证正常读取通路；诊断 CLI 本身仍不宣称验证 IPC |
 
 原生开发 `.app` 已重新构建。真实收据与运行绑定记录保留在本机 Orb 数据根，未提交任何会话 ID、需求摘要或本机验收文件。采集结果只对应当时选定的文件条件，不能证明整个上下文健康。精确 ID、实际数据根、工作区、源码版本与报告 ID 应一起核对，操作步骤见[接入说明](DISTRIBUTION.md#核对接入)。
 
@@ -53,6 +57,6 @@
 
 Windows 首轮 CI 暴露了两处兼容问题：Git 自动换行改变字节夹具，以及 CPython 3.12 路径查询与句柄查询的 ctime 语义不同。现对共享夹具固定 LF；同 API 的读取前后仍完整比较，跨 API 只比较文件身份、大小与修改时间。新增反例在旧实现下复现失败，修复后通过，ctime-only 变化、内容修改和文件替换仍会被拒绝。依据：[CPython 路径查询](https://github.com/python/cpython/blob/v3.12.10/Modules/posixmodule.c#L2139-L2149)、[句柄查询](https://github.com/python/cpython/blob/v3.12.10/Python/fileutils.c#L1109-L1127)、[Windows 文件时间定义](https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_basic_info)。最终平台结论仍以对应提交的 CI 为准。
 
-尚未完成：客户端新任务技能加载、hook trust/自然 dispatch、原生 IPC 与显示完整链；自动语义诊断与 C/C+S/fresh+S 对照校准；后台模型复查、系统通知、前台自动跟随；Windows 真机、多显示器、签名公证、安装升级和官方目录审核。
+尚未完成：在新任务中由 `$context-health` 发起采集的完整演练（本次真实采集由主会话显式执行插件脚本）；自动语义诊断与 C/C+S/fresh+S 对照校准；后台模型复查、系统通知、前台自动跟随；Windows 真机、多显示器、签名公证、安装升级和官方目录审核。
 
-原生 UI 自动化受本机 macOS 系统权限限制，浏览器组件 QA 不能替代原生真机验收。
+本机 macOS 权限完成后已执行原生窗口验收；Windows CI 不替代 Windows 真机运行。Codex 自身界面不在本次原生控制工具允许范围内，hook review 由用户手动完成。

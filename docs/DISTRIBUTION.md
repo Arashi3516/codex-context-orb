@@ -41,7 +41,7 @@ codex plugin list --json --marketplace personal
 
 安装、启用和 hook trust 是独立状态。Codex 会跳过未信任的非托管 hooks；当前定义更新后可能再次需要其内置 review 流程。只有在目标客户端实际产生匹配快照后，才能报告“元数据接入成功”。不要将已安装状态当作已经采集成功。[官方 Hooks](https://learn.chatgpt.com/docs/hooks)
 
-在客户端通过 `/hooks` 审阅此插件的六个异步命令。它们只调用本插件的 `emit_hook_event.py`，读取当前事件的允许字段并写入 Orb 自己的目录。按客户端显示的信任流程启用后，用新任务加载插件技能，再主动请求 `$context-health`。新任务是插件定义的加载边界，不是上下文质量或重启收益建议。
+在 Codex CLI 中输入 `/hooks`，审阅此插件的六个异步命令。它们只调用本插件的 `emit_hook_event.py`，读取当前事件的允许字段并写入 Orb 自己的目录。按 CLI 显示的信任流程启用后，用新任务加载插件技能，再主动请求 `$context-health`。新任务是插件定义的加载边界，不是上下文质量或重启收益建议。
 
 本地独立验证，无需安装插件：
 
