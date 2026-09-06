@@ -3,7 +3,7 @@ import type { CSSProperties, PointerEvent } from 'react'
 import {
   ArrowDownLeft, ArrowLeft, ArrowUpRight, BellOff, Check, ChevronDown,
   ChevronRight, CircleHelp, Copy, ExternalLink, Folder, Github, Info, Layers,
-  LockKeyhole, Magnet, Moon, MoreHorizontal, Pin, Plus, Settings2, ShieldCheck, Sun, X,
+  LockKeyhole, Magnet, Minimize2, Moon, MoreHorizontal, Pin, Plus, ScanLine, Settings2, ShieldCheck, Sun, X,
 } from 'lucide-react'
 import { createHandoffTemplate, createReviewPrompt, describeProbe, evaluateContext, resolvePinned, SIGNAL_LABELS } from './lib/context'
 import type { ContextSnapshot } from './lib/context'
@@ -13,11 +13,13 @@ import { beginNativeMagneticDrag, endNativeMagneticDrag, getNativeMagnetState, i
 import { DEFAULT_MAGNET, WINDOW_MODE_LABELS, dockPreview, latestMagnetState, parseMagnetPreferences, type MagnetPreferences, type MagnetState, type Rect, type WindowMagnetMode } from './lib/magnet'
 import { presentCapacity, presentCompactions, presentRisk } from './lib/presentation'
 import ContextReadout from './ContextReadout'
+import { OrbVisual } from './OrbVisual'
+import { captureOrbIntent, isCurrentOrbIntent, primaryOrbAction, type OrbIntent } from './lib/orb-actions'
 
-type PanelView = 'overview' | 'sessions' | 'handoff' | 'settings' | 'evidence' | 'review' | 'ledger' | 'history'
+type PanelView = 'overview' | 'sessions' | 'handoff' | 'settings' | 'evidence' | 'review' | 'ledger' | 'history' | 'connection'
 const widgetSurface = isNative || new URLSearchParams(location.search).get('surface') === 'orb'
 const scenarioLabels: Record<DemoScenario, string> = {
-  passed: '所列检查通过', failed: '发现约束偏差', superseded: '旧方案已作废', unknown: '关键证据缺失',
+  passed: '所列检查通过', failed: '发现约束偏差', review: '疑点待核验', unknown: '关键证据缺失', superseded: '旧方案已作废',
 }
 
 function readPreference(key: string, fallback: string) {
@@ -39,6 +41,8 @@ export default function App() {
   const [sessions, setSessions] = useState<ContextSnapshot[]>(() => isNative ? [] : demoSessions('failed'))
   const [pinnedId, setPinnedId] = useState<string | null>(() => isNative ? readPreference('orb:pinned', '') || null : DEMO_PRIMARY_ID)
   const [expanded, setExpanded] = useState(!widgetSurface)
+  const [peek, setPeek] = useState(false)
+  const [gestureActive, setGestureActive] = useState(false)
   const [view, setView] = useState<PanelView>('overview')
   const [now, setNow] = useState(Date.now())
   const [snoozedSessions, setSnoozedSessions] = useState<Record<string, number>>({})
@@ -53,6 +57,7 @@ export default function App() {
   const [historicalReport, setHistoricalReport] = useState<EvidenceReport | null>(null)
   const [offset, setOffset] = useState({ x: 0, y: 0 })
   const [dynamicColor, setDynamicColor] = useState(() => readPreference('orb:dynamic-color', 'true') !== 'false')
+  const [motionEnabled, setMotionEnabled] = useState(() => readPreference('orb:motion', 'true') !== 'false')
   const [showCompactions, setShowCompactions] = useState(() => readPreference('orb:show-compactions', 'false') === 'true')
   const [magnetPreferences, setMagnetPreferences] = useState(() => parseMagnetPreferences(readPreference('orb:magnet', JSON.stringify(DEFAULT_MAGNET))))
   const [magnetState, updateMagnetState] = useState<MagnetState | null>(null)
@@ -71,8 +76,14 @@ export default function App() {
   const stageRef = useRef<HTMLElement>(null)
   const helpRef = useRef<HTMLElement>(null)
   const helpTriggerRef = useRef<HTMLButtonElement>(null)
-  const pointer = useRef<{ x: number; y: number; moved: boolean; rect: Rect; stage: Rect; nativeStart?: Promise<MagnetState> } | null>(null)
+  const pointer = useRef<{ x: number; y: number; moved: boolean; rect: Rect; stage: Rect; intent: OrbIntent; expanded: boolean; nativeStart?: Promise<MagnetState> } | null>(null)
+  const peekTimer = useRef<number | undefined>(undefined)
+  const peekBlocked = useRef(false)
+  const keyboardIntent = useRef<OrbIntent | null>(null)
+  const panelIntent = useRef<OrbIntent | null>(null)
   const resizeQueue = useRef(Promise.resolve())
+  const resizeGeneration = useRef(0)
+  const nativeResizeBusy = useRef(false)
   const snapshot = resolvePinned(sessions, pinnedId)
   const health = evaluateContext(snapshot, now)
   const risk = presentRisk(snapshot, now)
@@ -88,6 +99,12 @@ export default function App() {
   const displayedHealth = displayedReport && snapshot ? evaluateContext({ ...snapshot, report: displayedReport }, now) : health
   const reviewPrompt = createReviewPrompt(isNative ? pinnedId : null)
   const snoozed = !!pinnedId && now < (snoozedSessions[pinnedId] ?? 0)
+  const action = primaryOrbAction(snapshot, now)
+  const currentAction = useRef(action)
+  currentAction.current = action
+  const expandedRef = useRef(expanded)
+  expandedRef.current = expanded
+  const ActionIcon = action.kind === 'select-session' ? Plus : action.kind === 'prepare-review' ? ScanLine : action.kind === 'compact-guide' ? Minimize2 : action.kind === 'view-evidence' ? ArrowUpRight : Info
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme
@@ -134,13 +151,20 @@ export default function App() {
   }, [view, pinnedId, report])
   useEffect(() => {
     if (!isNative) return
+    const generation = ++resizeGeneration.current
+    if (gestureActive) return
+    const surface = expanded ? 'details' : peek ? 'peek' : 'collapsed'
     resizeQueue.current = resizeQueue.current.then(async () => {
-      const state = await sizeOrbWindow(expanded)
-      if (state) setMagnetState(state)
+      if (generation !== resizeGeneration.current || nativeGestureBusy.current) return
+      nativeResizeBusy.current = true
+      try {
+        const state = await sizeOrbWindow(surface)
+        if (state) setMagnetState(state)
+      } finally { nativeResizeBusy.current = false }
     }).catch(() => {
       setToast('窗口尺寸调整失败，可拖动悬浮球重新定位。')
     })
-  }, [expanded])
+  }, [expanded, peek, gestureActive])
   useEffect(() => {
     if (!isNative) return
     let cancelled = false, pending = false
@@ -170,6 +194,9 @@ export default function App() {
     return () => { cancelled = true }
   }, [])
   useEffect(() => { savePreference('orb:dynamic-color', String(dynamicColor)) }, [dynamicColor])
+  useEffect(() => { savePreference('orb:motion', String(motionEnabled)) }, [motionEnabled])
+  useEffect(() => { clearPeekTimer(); setPeek(false); keyboardIntent.current = null }, [pinnedId])
+  useEffect(() => () => { clearPeekTimer(); resizeGeneration.current++ }, [])
   useEffect(() => { savePreference('orb:show-compactions', String(showCompactions)) }, [showCompactions])
   useEffect(() => { savePreference('orb:magnet', JSON.stringify(magnetPreferences)); setPreviewSnap(null) }, [magnetPreferences])
   useEffect(() => {
@@ -200,9 +227,40 @@ export default function App() {
     setNow(Date.now())
   }
   function closePanel() {
+    clearPeekTimer()
+    peekBlocked.current = true
+    setPeek(false)
     setExpanded(false)
     setView('overview')
     orbRef.current?.focus({ preventScroll: true })
+  }
+  function clearPeekTimer() { window.clearTimeout(peekTimer.current); peekTimer.current = undefined }
+  function previewIntent() {
+    clearPeekTimer()
+    if (expandedRef.current || peekBlocked.current || pointer.current || nativeGestureBusy.current) return
+    peekTimer.current = window.setTimeout(() => {
+      if (!expandedRef.current && !peekBlocked.current && !pointer.current && !nativeGestureBusy.current) setPeek(true)
+    }, 350)
+  }
+  function leavePreview() {
+    clearPeekTimer()
+    peekBlocked.current = false
+    peekTimer.current = window.setTimeout(() => { if (!pointer.current && !nativeGestureBusy.current) setPeek(false) }, 180)
+  }
+  function openDetails() {
+    if (nativeGestureBusy.current || nativeResizeBusy.current || pointer.current) return
+    clearPeekTimer(); setPeek(false); setHistoricalReport(null); setView('overview'); setExpanded(true)
+  }
+  function dispatchAction(intent: OrbIntent) {
+    if (nativeGestureBusy.current || nativeResizeBusy.current || pointer.current) return
+    clearPeekTimer(); setPeek(false)
+    if (!isCurrentOrbIntent(intent, currentAction.current)) {
+      setToast('会话或检查依据已变化，请重新选择当前动作。')
+      return
+    }
+    setHistoricalReport(null)
+    setView(intent.kind === 'select-session' ? 'sessions' : intent.kind === 'prepare-review' ? 'review' : intent.kind === 'view-evidence' ? 'evidence' : intent.kind === 'compact-guide' ? 'connection' : 'overview')
+    setExpanded(true)
   }
   function pinSession(id: string) {
     setPinnedId(id)
@@ -258,12 +316,14 @@ export default function App() {
   }
   function pointerDown(event: PointerEvent<HTMLButtonElement>) {
     if (event.button !== 0) return
-    if (isNative && nativeGestureBusy.current) return
+    if (isNative && (nativeGestureBusy.current || nativeResizeBusy.current)) return
     const stage = stageRef.current?.getBoundingClientRect(), ball = orbRef.current?.getBoundingClientRect()
     if (!stage || !ball) return
+    clearPeekTimer()
+    setGestureActive(true)
     pointer.current = { x: isNative ? event.screenX : event.clientX, y: isNative ? event.screenY : event.clientY, moved: false,
       rect: { x: ball.x - stage.x, y: ball.y - stage.y, width: ball.width, height: ball.height },
-      stage: { x: stage.x, y: stage.y, width: stage.width, height: stage.height } }
+      stage: { x: stage.x, y: stage.y, width: stage.width, height: stage.height }, intent: captureOrbIntent(action), expanded }
     event.currentTarget.setPointerCapture(event.pointerId)
     if (isNative) {
       nativeGestureBusy.current = true
@@ -318,42 +378,59 @@ export default function App() {
         setMagnetState(state)
         wasMoved = wasMoved || state.lastDragMoved || Math.hypot(event.screenX - start.x, event.screenY - start.y) >= 4
       } catch { return }
-      finally { nativeGestureBusy.current = false }
+      finally { nativeGestureBusy.current = false; setGestureActive(false) }
     }
+    else setGestureActive(false)
     if (wasMoved) {
+      setPeek(false)
       if (isNative) setExpanded(false)
       if (!isNative) finishPreviewDrag(start, event.clientX, event.clientY)
       return
     }
-    setExpanded(open => !open)
-    setView('overview')
+    if (start.expanded !== expandedRef.current || !isCurrentOrbIntent(start.intent, currentAction.current)) {
+      setToast('会话或检查依据已变化，请重新选择当前动作。'); setPeek(false); return
+    }
+    if (start.expanded) closePanel()
+    else dispatchAction(start.intent)
   }
   function pointerCancel() {
     const start = pointer.current
     pointer.current = null; setDragging(false)
-    if (isNative && start) void Promise.resolve(start.nativeStart).then(() => endNativeMagneticDrag()).then(setMagnetState).catch(() => {}).finally(() => { nativeGestureBusy.current = false })
-    else if (start?.moved) finishPreviewDrag(start, start.x + offset.x - start.rect.x, start.y + offset.y - start.rect.y)
+    if (isNative && start) void Promise.resolve(start.nativeStart).then(() => endNativeMagneticDrag()).then(setMagnetState).catch(() => {}).finally(() => { nativeGestureBusy.current = false; setGestureActive(false); setPeek(false) })
+    else if (start) { setGestureActive(false); setPeek(false); if (start.moved) finishPreviewDrag(start, start.x + offset.x - start.rect.x, start.y + offset.y - start.rect.y) }
   }
-  async function keyboardToggle() {
-    if (nativeGestureBusy.current) return
+  async function keyboardToggle(intent = captureOrbIntent(currentAction.current)) {
+    if (nativeGestureBusy.current || nativeResizeBusy.current) return
+    clearPeekTimer()
+    const wasExpanded = expandedRef.current
     if (isNative) {
       nativeGestureBusy.current = true
+      setGestureActive(true)
       try { setMagnetState(await getNativeMagnetState()) }
       catch { setToast('窗口状态暂不可用，请重试。'); return }
-      finally { nativeGestureBusy.current = false }
+      finally { nativeGestureBusy.current = false; setGestureActive(false) }
     }
-    setExpanded(open => !open)
-    setView('overview')
+    if (wasExpanded !== expandedRef.current || !isCurrentOrbIntent(intent, currentAction.current)) {
+      setToast('会话或检查依据已变化，请重新选择当前动作。'); return
+    }
+    if (wasExpanded) closePanel()
+    else dispatchAction(intent)
   }
 
-  const orb = <div ref={dockRef} className={`orb-dock level-${health.level} risk-${dynamicColor ? risk.tone : 'neutral'} ${previewLayout ? 'preview-placed' : ''} ${dockLeft ? 'dock-left' : ''} ${dockTop ? 'dock-top' : ''} ${dragging || magnetState?.dragging ? 'is-dragging' : ''} ${snapped ? 'is-snapped' : ''}`} style={{ '--orb-x': `${offset.x}px`, '--orb-y': `${offset.y}px`, '--preview-panel-width': `${previewLayout?.width ?? 340}px`, '--preview-panel-height': `${previewLayout?.height ?? 600}px` } as CSSProperties}>
+  const orb = <div ref={dockRef} onPointerEnter={previewIntent} onPointerLeave={leavePreview} className={`orb-dock level-${health.level} risk-${dynamicColor ? risk.tone : 'neutral'} ${previewLayout ? 'preview-placed' : ''} ${dockLeft ? 'dock-left' : ''} ${dockTop ? 'dock-top' : ''} ${dragging || magnetState?.dragging ? 'is-dragging' : ''} ${snapped ? 'is-snapped' : ''}`} style={{ '--orb-x': `${offset.x}px`, '--orb-y': `${offset.y}px`, '--preview-panel-width': `${previewLayout?.width ?? 340}px`, '--preview-panel-height': `${previewLayout?.height ?? 600}px` } as CSSProperties}>
+    {peek && !expanded && <aside className="orb-peek" data-testid="orb-peek" role="note" aria-label="动作预览">
+      <div className="peek-target"><Pin size={11} /><span>{snapshot?.title ?? '尚未固定会话'}</span><span>{isNative ? '本地' : '演示'}</span></div>
+      <strong><ActionIcon size={16} />{action.label}</strong>
+      <p>{risk.value} · {capacity.percent === null ? '容量未接入' : `容量 ${capacity.percent}%（演示）`}</p>
+      <small>{health.reviewedAt ? `依据 ${new Date(health.reviewedAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}` : '等待检查依据'}<span>点击执行 · 右键详情</span></small>
+    </aside>}
     {expanded && <section
       id="orb-panel" className="orb-panel" data-testid="orb-panel" ref={panelRef} tabIndex={-1}
       role="dialog" aria-label="会话状态" onKeyDown={event => { if (event.key === 'Escape') closePanel() }}
     >
       <header className="panel-top">
-        <div className="panel-brand"><OrbMark /><span>Context Orb</span><span className="version-pill">v0.4.5 预览</span></div>
-        <button className="icon-button" aria-label="收起面板" onClick={closePanel}><X size={17} /></button>
+        <div className="panel-brand"><OrbMark /><span>Context Orb</span><span className="version-pill">v0.5.0</span></div>
+        <div className="panel-tools"><button className="icon-button" aria-label="提醒设置" onClick={() => setView('settings')}><Settings2 size={16} /></button><button className="icon-button" aria-label="收起面板" onClick={closePanel}><X size={17} /></button></div>
       </header>
       {view !== 'overview' && <button className="back-button" onClick={() => { setView('overview'); setHistoricalReport(null) }}><ArrowLeft size={14} />返回概览</button>}
       {view === 'overview' && <>
@@ -363,6 +440,21 @@ export default function App() {
           <ChevronDown size={15} />
         </button>
         <ContextReadout snapshot={snapshot} now={now} showCompactions={showCompactions} />
+        <div className="panel-actions">
+          <button className="primary-button" data-testid="primary-action"
+            onPointerDown={event => { if (event.button === 0) panelIntent.current = captureOrbIntent(currentAction.current) }}
+            onPointerCancel={() => { panelIntent.current = null }} onBlur={() => { panelIntent.current = null }}
+            onKeyDown={event => { if ((event.key === 'Enter' || event.key === ' ') && !event.repeat) panelIntent.current = captureOrbIntent(currentAction.current); else if (event.repeat) event.preventDefault() }}
+            onClick={event => {
+              const intent = panelIntent.current ?? (event.detail === 0 ? captureOrbIntent(currentAction.current) : null)
+              panelIntent.current = null
+              if (intent) dispatchAction(intent)
+            }}>
+            {action.label}<ActionIcon size={16} />
+          </button>
+          <button className="secondary-button" disabled={!snapshot} onClick={snooze}><BellOff size={14} />稍后提醒</button>
+        </div>
+        <div className="support-actions"><button className="text-button" disabled={!snapshot} onClick={prepareHandoff}>整理交接简报<ChevronRight size={13} /></button><button className="text-button" onClick={() => setView('review')}>准备检查指令<ChevronRight size={13} /></button></div>
         <div className="semantic-card" data-testid="semantic-card">
           <div className="semantic-card-label"><span>下一步的检查依据</span><span className="source-label">{snapshot?.source === 'demo' ? '模拟收据' : report ? '本地文件检查' : '尚未收集'}</span></div>
           {report ? <>
@@ -375,13 +467,8 @@ export default function App() {
           </> : <div className="review-empty"><CircleHelp size={24} /><strong>等待一次有依据的检查</strong><p>声明有效要求，检查明确选定的文件。无法验证的前提继续标为未知。</p>{assessment && <button className="evidence-link" onClick={() => setView('evidence')}>回顾旧版评估<ArrowUpRight size={14} /></button>}</div>}
         </div>
         <div className="quiet-note"><Info size={16} /><p>{connectionError ? '本地报告暂不可读，请检查接入配置。' : report ? '截至本次采集 · 新开收益尚未评估' : '由你在目标会话发起收集，悬浮球展示本地结果。'}<br /><span>{health.notices[1] ?? (report ? '文件检查结果不代表整个上下文已被验证。' : '声明来源、实际检查与未知项分别保留。')}</span></p></div>
-        <div className="panel-actions">
-          <button className="primary-button" onClick={!report ? () => setView('review') : prepareHandoff}>
-            {!report ? '准备证据检查' : '整理下一步简报'}<ArrowUpRight size={16} />
-          </button>
-          <button className="secondary-button" disabled={!snapshot} onClick={snooze}><BellOff size={14} />稍后提醒</button>
-        </div>
-        <footer className="panel-footer"><span><i />{health.reviewedAt !== null ? `${isNative ? '采集于' : '演示采集'} ${new Date(health.reviewedAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}` : '等待本地报告'}</span><button onClick={() => setView('settings')} aria-label="提醒设置"><Settings2 size={14} />设置</button></footer>
+        <footer className="panel-footer"><span><i />{health.reviewedAt !== null ? `${isNative ? '采集于' : '演示采集'} ${new Date(health.reviewedAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}` : '等待本地报告'}</span><button onClick={() => setView('connection')}>接入状态<ChevronRight size={13} /></button></footer>
+        <p className="gesture-hint">悬停预览 · 点击主动作 · 右键或 ⇧F10 查看详情</p>
       </>}
       {view === 'sessions' && <div className="subview">
         <h2>只关注，你选中的会话</h2><p className="subview-intro">手动固定一个会话。后台任务的更新不会自动切换它。</p>
@@ -464,6 +551,15 @@ export default function App() {
         <button className="primary-button full-width" onClick={() => void copyText(handoff, '已复制。可先在原会话核对并纠正；新开收益尚未评估。')}><Copy size={15} />复制任务简报</button>
         <p className="micro-note">检查收据只对应采集时点；目标或文件改变后需要重新核验。</p>
       </div>}
+      {view === 'connection' && <div className="subview connection-view">
+        <span className="status-chip status-unknown"><i />桌面操作尚未接入</span><h2>当前能做什么</h2>
+        <p className="subview-intro">{snapshot ? `固定目标：${snapshot.title}。` : '先选择要关注的会话。'}当前可读取本地检查、准备指令和整理简报。</p>
+        <dl className="connection-list"><div><dt>检查依据</dt><dd>{isNative ? connectionError ? '暂不可读' : '本地文件读取' : '演示收据'}</dd></div><div><dt>真实容量</dt><dd>尚未接入</dd></div><div><dt>自动压缩</dt><dd>尚未接入</dd></div><div><dt>交接并自动继续</dt><dd>尚未接入</dd></div></dl>
+        <h3 className="evidence-section-title">需要压缩时</h3><p className="review-note">在固定的 Codex 会话中使用客户端提供的压缩入口。若该客户端支持 /compact，可在该会话内发送。操作后等待新的容量读数，再判断是否释放了空间。</p>
+        <p className="review-note">压缩不会清除已有检查偏差。先确认有效目标、约束和下一步，再继续工作。</p>
+        <button className="primary-button full-width" disabled={!snapshot} onClick={prepareHandoff}>整理交接简报<ArrowUpRight size={16} /></button>
+        <p className="micro-note">简报准备完成后，仍需你在目标会话发起操作。</p>
+      </div>}
       {view === 'settings' && <div className="subview settings-view">
         <h2>按你的习惯停靠</h2><p className="subview-intro">拖动后松手，自动停靠最近的边框。</p>
         <fieldset className="magnet-settings"><legend><Magnet size={14} />窗口吸附</legend>
@@ -474,6 +570,7 @@ export default function App() {
           {!isNative && <small>此处演示网页内拖拽；桌面版使用真实窗口边界。</small>}
         </fieldset>
         <div className="setting-row"><div><strong>球体动态配色</strong><small>随脏度线索变化，保留状态符号</small></div><button className="switch" role="switch" aria-label="球体动态配色" aria-checked={dynamicColor} onClick={() => setDynamicColor(value => !value)}><span /></button></div>
+        <div className="setting-row"><div><strong>球内流动效果</strong><small>拖动和隐藏时暂停，遵循系统减少动态效果</small></div><button className="switch" role="switch" aria-label="球内流动效果" aria-checked={motionEnabled} onClick={() => setMotionEnabled(value => !value)}><span /></button></div>
         <div className="setting-row"><div><strong>显示压缩次数</strong><small>在容量下方显示，不参与脏度判断</small></div><button className="switch" role="switch" aria-label="显示压缩次数" aria-checked={showCompactions} onClick={() => setShowCompactions(value => !value)}><span /></button></div>
         <div className="setting-row"><div><strong>外观</strong><small>与你的工作环境协调</small></div><button className="theme-toggle" onClick={() => setTheme(theme === 'light' ? 'dark' : 'light')} aria-label="切换面板主题">{theme === 'light' ? <Moon size={17} /> : <Sun size={17} />}</button></div>
         <div className="setting-row"><div><strong>稍后提醒</strong><small>{snoozed ? '此会话已暂停 10 分钟' : '需要安静时，暂停 10 分钟'}</small></div><button className="text-button" disabled={!snapshot} onClick={() => { if (snoozed && pinnedId) { setSnoozedSessions(current => ({ ...current, [pinnedId]: 0 })); setToast('此会话提醒已恢复。') } else snooze() }}>{snoozed ? '恢复' : '暂停'}</button></div>
@@ -486,24 +583,32 @@ export default function App() {
       {!expanded && !widgetSurface && !previewLayout && <div className="resting-caption"><span>{snoozed ? '安静 10 分钟' : health.label}</span><ArrowDownLeft size={14} /></div>}
       <button
         ref={orbRef} className={`orb-button ${snoozed ? 'snoozed' : ''}`}
-        aria-label={expanded ? '收起 Context Orb' : '展开 Context Orb'} aria-expanded={expanded}
-        aria-controls="orb-panel" aria-describedby="orb-state-description" title={`${risk.value} · ${capacity.percent === null ? '用量未接入' : `容量 ${capacity.percent}%（演示）`} · 点击展开，拖动定位`}
+        aria-label={expanded ? '收起 Context Orb' : `${action.label} · Context Orb`} aria-expanded={expanded} aria-haspopup="dialog"
+        aria-controls="orb-panel" aria-describedby="orb-state-description" title={`${action.label} · ${risk.value} · ${capacity.percent === null ? '容量未接入' : `容量 ${capacity.percent}%（演示）`} · 右键详情，拖动定位`}
         onPointerDown={pointerDown} onPointerMove={pointerMove} onPointerUp={event => void pointerUp(event)} onPointerCancel={pointerCancel} onLostPointerCapture={pointerCancel}
-        onClick={event => { if (event.detail === 0) void keyboardToggle() }}
+        onFocus={previewIntent} onBlur={() => { keyboardIntent.current = null; leavePreview() }}
+        onContextMenu={event => { event.preventDefault(); openDetails() }}
+        onKeyDown={event => {
+          if (event.key === 'Escape') { event.preventDefault(); closePanel() }
+          if (event.key === 'ContextMenu' || (event.key === 'F10' && event.shiftKey)) { event.preventDefault(); openDetails() }
+          if ((event.key === 'Enter' || event.key === ' ') && !event.repeat) keyboardIntent.current = captureOrbIntent(currentAction.current)
+          else if ((event.key === 'Enter' || event.key === ' ') && event.repeat) event.preventDefault()
+        }}
+        onClick={event => { if (event.detail === 0) { const intent = keyboardIntent.current ?? captureOrbIntent(currentAction.current); keyboardIntent.current = null; void keyboardToggle(intent) } }}
       >
-        <svg className={`orb-ring ${capacity.ratio === null ? 'capacity-unknown' : 'capacity-known'}`} viewBox="0 0 80 80" aria-hidden="true">
-          <circle className="orb-ring-base" cx="40" cy="40" r="36" />
-          <circle className="orb-ring-fill" cx="40" cy="40" r="36" pathLength="100" strokeDasharray={capacity.ratio === null ? '1 7' : '100 100'} strokeDashoffset={capacity.ratio === null ? 0 : 100 - capacity.ratio * 100} />
+        <svg className={`orb-ring ${capacity.ratio === null ? 'capacity-unknown' : 'capacity-known'}`} viewBox="0 0 84 84" aria-hidden="true">
+          <circle className="orb-ring-base" cx="42" cy="42" r="41" />
+          <circle className="orb-ring-fill" cx="42" cy="42" r="41" pathLength="100" strokeDasharray={capacity.ratio === null ? '1 7' : '100 100'} strokeDashoffset={capacity.ratio === null ? 0 : 100 - capacity.ratio * 100} />
         </svg>
-        <span className="orb-core">{snoozed ? <BellOff size={22} /> : capacity.percent !== null ? <span className="orb-capacity">{capacity.percent}<small>%</small></span> : <OrbMark />}</span>
-        <span className="orb-status-dot" aria-hidden="true">{risk.tone === 'aligned' ? '✓' : risk.tone === 'deviation' ? '!' : '?'}</span>
+        <OrbVisual tone={risk.tone} className={dynamicColor ? '' : 'orb-monochrome'} animated={motionEnabled} paused={gestureActive || !!magnetState?.dragging} />
+        <span className="orb-action-glyph" aria-hidden="true">{expanded ? <X size={12} /> : snoozed ? <BellOff size={12} /> : <ActionIcon size={12} />}</span>
         {(dragging || magnetState?.dragging) && <span className="snap-indicator" aria-hidden="true"><Magnet size={11} /></span>}
       </button>
-      <span id="orb-state-description" className="sr-only">脏度线索：{risk.value}。上下文容量：{capacity.percent === null ? '未接入' : `${capacity.percent}%，演示用量`}。{showCompactions && `压缩次数：${compactions.value}。`}{snapped && `已吸附${snapped === 'screen' ? '屏幕' : '窗口'}边缘。`}</span>
+      <span id="orb-state-description" className="sr-only">目标：{snapshot?.title ?? '尚未固定会话'}。脏度线索：{risk.value}。上下文容量：{capacity.percent === null ? '未接入' : `${capacity.percent}%，演示用量`}。{action.reason} 右键或 Shift F10 查看详情。{showCompactions && `压缩次数：${compactions.value}。`}{snapped && `已吸附${snapped === 'screen' ? '屏幕' : '窗口'}边缘。`}</span>
     </div>
   </div>
 
-  if (widgetSurface) return <main className="native-stage" ref={stageRef}>{orb}{toast && expanded && <div role="status" className="toast native-toast">{toast}</div>}</main>
+  if (widgetSurface) return <main className="native-stage" ref={stageRef}>{orb}{toast && <div role="status" className={expanded ? 'toast native-toast' : 'sr-only'}>{toast}</div>}</main>
 
   return <div className="studio-shell">
     <header className="studio-header">
@@ -515,12 +620,13 @@ export default function App() {
         <div className="eyebrow"><span />EVIDENCE FOR YOUR NEXT STEP</div>
         <h1>专注，<br />让思路<span className="serif-word">清楚。</span></h1>
         <p className="intro-copy">留下有效的要求，核对这一步的依据。<br />让旧说法有去处，让下一步看得清。</p>
-        <div className="platform-row"><span><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M13.4 3.7c.8-1 1-2 .9-2.7-1 .1-2.1.6-2.8 1.5-.7.8-1 1.9-.9 2.7 1 .1 2-.5 2.8-1.5ZM16.9 14.2c-.4.9-.6 1.3-1.1 2.1-.7 1-1.6 2.4-2.8 2.4-1.1 0-1.4-.7-2.9-.7s-1.8.7-2.9.7c-1.2 0-2-1.2-2.7-2.2C2.5 13.6 2 9.7 3.3 7.7c.9-1.4 2.3-2.1 3.6-2.1 1.2 0 2 .7 3 .7s1.6-.7 3-.7c1.1 0 2.4.6 3.3 1.7-2.9 1.6-2.4 5.6.7 6.9Z" fill="currentColor"/></svg>macOS</span><span><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m2 4 7-1v6H2V4Zm8-1.2L18 2v7h-8V2.8ZM2 10h7v6l-7-1v-5Zm8 0h8v7l-8-1v-6Z" fill="currentColor"/></svg>Windows</span><span className="platform-stage">框架 v0.4</span></div>
+        <div className="platform-row"><span><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M13.4 3.7c.8-1 1-2 .9-2.7-1 .1-2.1.6-2.8 1.5-.7.8-1 1.9-.9 2.7 1 .1 2-.5 2.8-1.5ZM16.9 14.2c-.4.9-.6 1.3-1.1 2.1-.7 1-1.6 2.4-2.8 2.4-1.1 0-1.4-.7-2.9-.7s-1.8.7-2.9.7c-1.2 0-2-1.2-2.7-2.2C2.5 13.6 2 9.7 3.3 7.7c.9-1.4 2.3-2.1 3.6-2.1 1.2 0 2 .7 3 .7s1.6-.7 3-.7c1.1 0 2.4.6 3.3 1.7-2.9 1.6-2.4 5.6.7 6.9Z" fill="currentColor"/></svg>macOS</span><span><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m2 4 7-1v6H2V4Zm8-1.2L18 2v7h-8V2.8ZM2 10h7v6l-7-1v-5Zm8 0h8v7l-8-1v-6Z" fill="currentColor"/></svg>Windows</span><span className="platform-stage">框架 v0.5</span></div>
         <div className="scenario-controls">
           <div className="section-label"><span>试试四种状态</span><span>01 — 04</span></div>
           <div className="scenario-grid" role="group" aria-label="演示状态">
-            {(Object.keys(scenarioLabels) as DemoScenario[]).map((level, index) => <button key={level} className={`scenario-button level-${level === 'failed' ? 'watch' : level === 'unknown' ? 'unknown' : 'healthy'} ${scenario === level ? 'active' : ''}`} aria-pressed={scenario === level} onClick={() => chooseScenario(level)}><span className="scenario-indicator" /><span>{scenarioLabels[level]}</span><small>0{index + 1}</small></button>)}
+            {(['passed', 'failed', 'review', 'unknown'] as const).map((level, index) => <button key={level} className={`scenario-button level-${level === 'failed' ? 'handoff' : level === 'review' ? 'watch' : level === 'unknown' ? 'unknown' : 'healthy'} ${scenario === level ? 'active' : ''}`} aria-pressed={scenario === level} onClick={() => chooseScenario(level)}><span className="scenario-indicator" /><span>{scenarioLabels[level]}</span><small>0{index + 1}</small></button>)}
           </div>
+          <button className="text-button scenario-ledger" onClick={() => chooseScenario('superseded')}>旧方案已作废<ChevronRight size={13} /></button>
         </div>
         <div className="design-principle"><span className="principle-line" /><p>声明、检查、未知，分别保留。<br /><span>先核对，再决定怎样继续。</span></p></div>
       </section>

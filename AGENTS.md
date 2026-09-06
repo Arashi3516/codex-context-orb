@@ -9,7 +9,7 @@
 - Never present latest activity as the foreground/selected session. Manual pinning must be labeled.
 - Keep demo fixtures, hook metadata, and user-requested semantic reviews distinguishable in types and UI.
 - Metadata hooks must remain bounded and fail open. Do not block a Codex turn or modify its transcript.
-- Do not create, fork, compact, or interrupt a Codex session automatically.
+- Host operations require explicit user authorization, a verified connection to the exact task, applicable evidence, and confirmed operation events. The current reader has no task controller: expose preparation and details only, and never present these as executed host operations.
 - Keep windowing, telemetry, evaluation, and presentation separate.
 - Match the calm floating-orb design in docs/UIUX.md. Support keyboard input and reduced motion.
 - Run affected tests and npm run build. Native changes also require cargo test/check when available.

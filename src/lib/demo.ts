@@ -3,14 +3,14 @@ import type { EvidenceReport } from './evidence'
 
 export const DEMO_PRIMARY_ID = 'demo-current'
 export const DEMO_BACKGROUND_ID = 'demo-background'
-export type DemoScenario = 'passed' | 'failed' | 'superseded' | 'unknown'
+export type DemoScenario = 'passed' | 'failed' | 'superseded' | 'unknown' | 'review'
 
 /** Every byte here is synthetic. No fixture is a receipt from a real user session. */
 export function demoReport(scenario: DemoScenario, now = Date.now()): EvidenceReport {
-  const passed = scenario === 'passed' || scenario === 'superseded'
+  const passed = scenario === 'passed' || scenario === 'superseded' || scenario === 'review'
   const missing = scenario === 'unknown'
   return {
-    schema_version: 2, source: 'codex-evidence-review', report_id: (passed ? 'a' : missing ? 'c' : 'b').repeat(64),
+    schema_version: 2, source: 'codex-evidence-review', report_id: (scenario === 'review' ? 'f' : passed ? 'a' : missing ? 'c' : 'b').repeat(64),
     session_id: DEMO_PRIMARY_ID, turn_id: 'demo-turn-30', reviewed_at_ms: now,
     scope: { mode: 'as_of', origin: 'main', action_id: 'settings-review', goal_id: 'goal-settings',
       next_step: '核对保存方式，再检查键盘导航与错误反馈。', coverage: 'declared', unknowns: missing ? ['键盘导航检查需要实际交互，尚未核验。'] : [] },
@@ -30,7 +30,7 @@ export function demoReport(scenario: DemoScenario, now = Date.now()): EvidenceRe
       { id: 'check-feedback', item_id: 'feedback', source_id: 'settings', rule: 'contains', expected: 'savedFeedback: true', result: missing ? 'unknown' : 'pass',
         detail: missing ? '所选文件不可读，未执行文字检查。' : '所选版本包含指定的反馈配置。' },
     ],
-    observations: scenario === 'failed' ? [{ id: 'old-plan', item_id: 'save-manual', kind: 'stale_fact', summary: '演示记录：已否决的自动保存方案似乎再次成为前提；该归因尚待核验。', status: 'open', recurrence: 'after_correction', source_ids: ['request', 'settings'] }] : [],
+    observations: scenario === 'failed' || scenario === 'review' ? [{ id: 'old-plan', item_id: 'save-manual', kind: 'stale_fact', summary: '演示记录：已否决的自动保存方案似乎再次成为前提；该归因尚待核验。', status: 'open', recurrence: 'after_correction', source_ids: ['request', 'settings'] }] : [],
   }
 }
 

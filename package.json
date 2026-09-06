@@ -1,6 +1,6 @@
 {
   "name": "codex-context-orb",
-  "version": "0.4.5",
+  "version": "0.5.0",
   "private": true,
   "description": "A quiet, local context companion for Codex. Cross-platform foundation and interactive design preview.",
   "type": "module",

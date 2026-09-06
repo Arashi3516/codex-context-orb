@@ -1,0 +1,49 @@
+.orb-visual {
+  --orb-shell-light: #3f427d;
+  --orb-shell-mid: #101947;
+  --orb-shell-dark: #050b24;
+  --orb-band-pale: #dceeff;
+  --orb-band-light: #78d8ff;
+  --orb-band-mid: #7998f7;
+  --orb-band-deep: #494abb;
+  display: block;
+  position: relative;
+  flex: 0 0 auto;
+  width: var(--orb-visual-size, 70px);
+  height: var(--orb-visual-size, 70px);
+  overflow: hidden;
+  contain: paint;
+  border-radius: 50%;
+  isolation: isolate;
+  pointer-events: none;
+}
+
+.orb-visual > .orb-visual-svg,
+.orb-visual > .orb-visual-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+.orb-visual > .orb-visual-canvas[hidden] { display: none; }
+
+.orb-visual[data-tone='unknown'] {
+  --orb-shell-light: #7a859c;
+  --orb-shell-mid: #374259;
+  --orb-shell-dark: #131c30;
+}
+
+.orb-visual[data-tone='review'] {
+  --orb-band-light: #a0c3f7;
+  --orb-band-mid: #8187cf;
+}
+
+.orb-visual[data-tone='deviation'] {
+  --orb-band-pale: #ffe5da;
+  --orb-band-light: #ffb3aa;
+  --orb-band-mid: #d3738b;
+  --orb-band-deep: #6245a7;
+}
+
+/* Compatibility SVG is intentionally static; only the canvas owns the live frame loop. */

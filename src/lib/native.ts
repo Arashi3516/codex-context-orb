@@ -82,9 +82,10 @@ export async function readEvidenceHistory(sessionId: string): Promise<EvidenceRe
   return invoke<EvidenceReport[]>('read_evidence_history', { sessionId })
 }
 
-export async function sizeOrbWindow(expanded: boolean) {
+export async function sizeOrbWindow(surface: 'collapsed' | 'peek' | 'details') {
   if (!isNative) return
-  return magnetCommand('resize_orb_window', { width: expanded ? 382 : 92, height: expanded ? 690 : 92 })
+  const [width, height] = surface === 'details' ? [382, 690] : surface === 'peek' ? [320, 240] : [92, 92]
+  return magnetCommand('resize_orb_window', { width, height })
 }
 
 async function magnetCommand(command: string, args?: Record<string, unknown>): Promise<MagnetState> {
