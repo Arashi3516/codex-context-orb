@@ -29,9 +29,19 @@ npm run desktop:dev
 
 插件根目录：`plugins/codex-context-orb`。它有 `.codex-plugin/plugin.json`、聚焦的 `context-health` skill、`hooks/hooks.json` 和可运行 Python 脚本，没有占位 MCP 服务或虚构登录方式。Python 3.9+ 是首期 hook 的单独运行依赖；macOS 命令为 `python3`，Windows 命令为 `py -3`。
 
-用户可按当前 Codex 的仓库插件安装流程选择这个包。若采用仓库 marketplace，应先在仓库配置可发现的 marketplace，再由用户添加该 marketplace 和安装插件；具体命令需以实际提交的仓库地址和 Codex CLI 帮助为准。当前插件骨架不会写入个人 marketplace 或修改用户全局配置。[官方插件打包与安装方式](https://developers.openai.com/plugins/build/plugins)
+仓库已包含 `.agents/plugins/marketplace.json`，目录名为 `personal`。在克隆后的仓库根目录，用支持 `plugin` 命令的 Codex CLI 执行：
+
+```sh
+codex plugin marketplace add . --json
+codex plugin add codex-context-orb@personal --json
+codex plugin list --json --marketplace personal
+```
+
+第一条注册本地仓库，第二条安装并启用插件，第三条核对实际来源和版本。这些显式命令会更新本机 Codex 的插件配置；仅克隆仓库或运行网页预览不会安装插件。[官方插件打包与安装方式](https://developers.openai.com/plugins/build/plugins)
 
 安装、启用和 hook trust 是独立状态。Codex 会跳过未信任的非托管 hooks；当前定义更新后可能再次需要其内置 review 流程。只有在目标客户端实际产生匹配快照后，才能报告“元数据接入成功”。不要将已安装状态当作已经采集成功。[官方 Hooks](https://learn.chatgpt.com/docs/hooks)
+
+在客户端通过 `/hooks` 审阅此插件的六个异步命令。它们只调用本插件的 `emit_hook_event.py`，读取当前事件的允许字段并写入 Orb 自己的目录。按客户端显示的信任流程启用后，用新任务加载插件技能，再主动请求 `$context-health`。新任务是插件定义的加载边界，不是上下文质量或重启收益建议。
 
 本地独立验证，无需安装插件：
 
@@ -39,10 +49,26 @@ npm run desktop:dev
 python3 plugins/codex-context-orb/scripts/test_hooks.py
 python3 plugins/codex-context-orb/scripts/test_assessments.py
 python3 plugins/codex-context-orb/scripts/test_evidence_review.py
+python3 plugins/codex-context-orb/scripts/test_doctor.py
 python3 plugins/codex-context-orb/scripts/inspect_events.py
 ```
 
 Windows 将 `python3` 替换成 `py -3`。适配器只写自己的数据根。默认 `~/.codex-context-orb`；需要隔离开发环境时，可给 hook 与桌面进程同时设置绝对路径的 `ORB_DATA_DIR`。用户如需移除本地快照，只删除已确认属于 Orb 的数据根；卸载插件无需清除或修改 Codex 会话。
+
+## 核对接入
+
+在已核实精确会话 ID 后运行：
+
+```sh
+python3 plugins/codex-context-orb/scripts/doctor.py --session-id verified-session-id
+cargo run --manifest-path src-tauri/Cargo.toml --locked -- --inspect-session verified-session-id
+```
+
+Python doctor 只读该 ID 的三个快照，分别报告缺失、无效或可读结果；在当前 Codex 运行环境里可省略 ID，使用 `CODEX_THREAD_ID`。显式参数与环境不一致会标记为不匹配。原生诊断调用应用相同的 Rust 读取函数，并额外检查该 ID 的有界历史。两者输出实际数据根和收据 ID，不输出任务摘要或文件内容，不创建目录。退出码 0 只表示诊断完成，各层状态仍须分别检查。
+
+两端的 `session_id`、数据根和 `report_id` 必须匹配。另行记录采集工作区、源码提交与客户端版本；v2 收据中的相对路径本身没有绑定工作区身份。诊断不执行模型、触发 hook 或操控界面，不能证明宿主 dispatch、原生 IPC 或实际显示。`inspect_events.py` 是旧版元数据工具，不能作为 v0.3 的整体自检。
+
+最后在桌面手动固定完整 ID，确认来源为本地文件检查、采集时点和实际检查结果。没有自然产生的目标 hook 或尚未亲测界面时，相应环节继续保留未验证。
 
 ## 后续：GitHub Releases 安装包
 

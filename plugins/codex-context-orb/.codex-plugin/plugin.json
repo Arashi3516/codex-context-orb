@@ -1,6 +1,6 @@
 {
   "name": "codex-context-orb",
-  "version": "0.3.0",
+  "version": "0.3.0+codex.20260906025931",
   "description": "Local task ledgers, explicit artifact checks, as-of evidence history and metadata-only lifecycle hooks.",
   "author": {
     "name": "Codex Context Orb contributors"

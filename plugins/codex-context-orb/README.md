@@ -6,6 +6,16 @@ Includes the context-health skill, asynchronous metadata-only hooks, and a local
 
 ## Use
 
+From the cloned repository root, register and install the included local catalog:
+
+```sh
+codex plugin marketplace add . --json
+codex plugin add codex-context-orb@personal --json
+codex plugin list --json --marketplace personal
+```
+
+Review this plugin's definitions through the client's `/hooks` trust flow. Start a new task to load the installed skills; this loading boundary does not imply a context-health recommendation. Installation and hook trust are separate.
+
 After enabling the plugin through your Codex client's installation and trust flow, request `$context-health` in the target session. The skill declares the task scope, source anchors and expected conditions. The Python collector reads explicitly selected workspace files and supplies the results. Exact session identity is required before saving; otherwise the skill answers in the conversation only.
 
 Manually pin the matching session in the desktop. Copying the prompt does not run a check. Results always describe the declared scope as of collection. A literal check cannot prove code behavior or complete context integrity. Restart benefit is not evaluated.
@@ -32,14 +42,18 @@ python3 scripts/evidence_review.py collect --input /absolute/manifest.json --wor
 python3 scripts/evidence_review.py read --session-id verified-session-id
 python3 scripts/evidence_review.py history --session-id verified-session-id
 python3 scripts/evidence_review.py validate --input /absolute/report.json
+python3 scripts/doctor.py --session-id verified-session-id
 ```
 
 Use [the manifest schema](scripts/evidence-manifest.schema.json) and [synthetic example](scripts/fixtures/evidence-manifest-valid.json). Manifests cannot supply check results. Store temporary manifests and user reports outside the repository. The report hash can be validated without re-reading files; that is not a fresh artifact check.
+
+The doctor reads only that session's three snapshots and reports each layer separately. It can use the current `CODEX_THREAD_ID` when the argument is omitted. It creates no directories, does not print task content, and does not prove host dispatch or native display. Use the [native reader diagnostic and runtime checklist](../../docs/DISTRIBUTION.md#核对接入) for the next steps.
 
 ```sh
 python3 scripts/test_hooks.py
 python3 scripts/test_assessments.py
 python3 scripts/test_evidence_review.py
+python3 scripts/test_doctor.py
 ```
 
 [Evidence contract](../../docs/EVIDENCE-CONTRACT.md) · [Design](../../docs/SEMANTIC-REVIEW.md) · [Distribution](../../docs/DISTRIBUTION.md). Real-client integration, algorithm calibration, platform acceptance, signed installers and marketplace approval remain separate gates.

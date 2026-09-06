@@ -40,6 +40,8 @@ npm run dev
 
 启用[仓库插件](plugins/codex-context-orb/README.md)后，在目标 Codex 会话请求 `$context-health`。技能整理声明范围与检查条件，Python 收集器读取明确选定的工作区文件，生成收据并保存；桌面按精确会话 ID 读取。原生窗口默认未绑定，需手动固定。复制检查指令本身不会运行检查。
 
+仓库提供可发现的 marketplace 和 Python / 原生只读诊断入口。安装命令、hook 信任与逐环节核对见[接入说明](docs/DISTRIBUTION.md)。
+
 Hook 只保存生命周期元数据。收据另存必要的要求摘要、来源路径、文件哈希和检查结果；不保存完整文件内容，但这些摘要仍可能包含私密项目信息。Orb 不读取私有对话文件或凭证，不上传报告，不新增外部 AI 请求。
 
 `npm run desktop:build` 用于开发打包。尚无签名且通过平台验收的安装包；插件源码不代表已安装或官方上架，插件也不能单独提供系统悬浮窗。
@@ -53,6 +55,7 @@ npm run check
 python3 plugins/codex-context-orb/scripts/test_hooks.py
 python3 plugins/codex-context-orb/scripts/test_assessments.py
 python3 plugins/codex-context-orb/scripts/test_evidence_review.py
+python3 plugins/codex-context-orb/scripts/test_doctor.py
 cargo test --manifest-path src-tauri/Cargo.toml --locked
 npx playwright install chromium
 npm run test:ui

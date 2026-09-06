@@ -2,11 +2,27 @@
 
 mod assessments;
 mod evidence;
+mod diagnostics;
 mod telemetry;
 
 use tauri::{Manager, PhysicalPosition};
 
 fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("--inspect-session") {
+        if args.len() != 3 {
+            eprintln!("Usage: codex-context-orb --inspect-session <exact-session-id>");
+            std::process::exit(2);
+        }
+        match diagnostics::inspect(&args[2]) {
+            Ok(report) => println!("{}", report),
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(2);
+            }
+        }
+        return;
+    }
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![telemetry::read_hook_events, assessments::read_semantic_assessments, evidence::read_evidence_reports, evidence::read_evidence_history])
         .setup(|app| {
