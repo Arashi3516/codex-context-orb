@@ -11,6 +11,43 @@ use std::{
 };
 use tauri::{Manager, WebviewWindow};
 
+const ACTIVE_TICK_INTERVAL: Duration = Duration::from_nanos(16_666_667);
+
+struct TickSchedule {
+    slot: Instant,
+    interval: Option<Duration>,
+}
+impl TickSchedule {
+    fn next_deadline(
+        &mut self,
+        posted: Instant,
+        completed: Instant,
+        interval: Duration,
+    ) -> Instant {
+        if self.interval != Some(interval) {
+            self.slot = posted;
+            self.interval = Some(interval);
+        }
+        let next = self.slot + interval;
+        self.slot = if completed <= next {
+            next
+        } else {
+            // Keep the frame grid, skipping expired slots in constant time.
+            // Both supported intervals are below one second.
+            let remainder = completed.duration_since(self.slot).as_nanos() % interval.as_nanos();
+            if remainder == 0 {
+                completed
+            } else {
+                completed + interval - Duration::from_nanos(remainder as u64)
+            }
+        };
+        self.slot
+    }
+    fn wake(&mut self, now: Instant) {
+        self.slot = now;
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum WindowMode {
@@ -620,20 +657,17 @@ impl Engine {
         Ok(())
     }
     fn tick_interval(&self) -> Duration {
-        Duration::from_millis(
-            if self.motion.is_some()
-                || self
-                    .drag
-                    .as_ref()
-                    .is_some_and(|d| d.release_frame.is_none())
-            {
-                16
-            } else if self.attachment.is_some() {
-                33
-            } else {
-                500
-            },
-        )
+        if self.motion.is_some()
+            || self.attachment.is_some()
+            || self
+                .drag
+                .as_ref()
+                .is_some_and(|d| d.release_frame.is_none())
+        {
+            ACTIVE_TICK_INTERVAL
+        } else {
+            Duration::from_millis(500)
+        }
     }
     fn tick(&mut self, window: &WebviewWindow) -> Result<(), String> {
         let desktop = self.desktop(window)?;
@@ -820,30 +854,43 @@ pub fn start(window: WebviewWindow) {
     }
     // Exactly one acknowledged callback at a time; no queued frame backlog and no
     // lock is held while sleeping. Follow reads only the one attached window.
-    std::thread::spawn(move || loop {
-        let (send, recv) = mpsc::sync_channel(1);
-        let own = window.clone();
-        if window
-            .run_on_main_thread(move || {
-                let state = own.state::<Magnet>();
-                let Ok(mut engine) = state.lock() else {
-                    let _ = send.send(Duration::from_millis(500));
-                    return;
-                };
-                if let Err(error) = engine.tick(&own) {
-                    engine.fail(error);
-                }
-                engine.view.revision = engine.view.revision.saturating_add(1);
-                let _ = send.send(engine.tick_interval());
-            })
-            .is_err()
-        {
-            break;
-        }
-        let Ok(interval) = recv.recv() else {
-            break;
+    std::thread::spawn(move || {
+        let mut schedule = TickSchedule {
+            slot: Instant::now(),
+            interval: None,
         };
-        let _ = wake_receiver.recv_timeout(interval);
+        loop {
+            let (send, recv) = mpsc::sync_channel(1);
+            let own = window.clone();
+            let posted = Instant::now();
+            if window
+                .run_on_main_thread(move || {
+                    let state = own.state::<Magnet>();
+                    let Ok(mut engine) = state.lock() else {
+                        let _ = send.send(Duration::from_millis(500));
+                        return;
+                    };
+                    if let Err(error) = engine.tick(&own) {
+                        engine.fail(error);
+                    }
+                    engine.view.revision = engine.view.revision.saturating_add(1);
+                    let _ = send.send(engine.tick_interval());
+                })
+                .is_err()
+            {
+                break;
+            }
+            let Ok(interval) = recv.recv() else {
+                break;
+            };
+            let completed = Instant::now();
+            let deadline = schedule.next_deadline(posted, completed, interval);
+            match wake_receiver.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                Ok(()) => schedule.wake(Instant::now()),
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
     });
 }
 
@@ -1048,6 +1095,62 @@ pub async fn resize_orb_window(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn tick_deadline_accounts_for_main_queue_and_callback_time() {
+        let start = Instant::now();
+        let mut schedule = TickSchedule {
+            slot: start,
+            interval: None,
+        };
+        let first = schedule.next_deadline(
+            start,
+            start + Duration::from_millis(8),
+            ACTIVE_TICK_INTERVAL,
+        );
+        assert_eq!(first, start + ACTIVE_TICK_INTERVAL);
+        let second = schedule.next_deadline(
+            first + Duration::from_millis(2),
+            first + Duration::from_millis(10),
+            ACTIVE_TICK_INTERVAL,
+        );
+        assert_eq!(second, start + ACTIVE_TICK_INTERVAL * 2);
+    }
+    #[test]
+    fn late_ticks_skip_expired_slots_without_a_catchup_queue() {
+        let start = Instant::now();
+        let at = |ms| start + Duration::from_millis(ms);
+        let interval = Duration::from_millis(10);
+        let mut schedule = TickSchedule {
+            slot: start,
+            interval: None,
+        };
+        assert_eq!(schedule.next_deadline(at(0), at(47), interval), at(50));
+        assert_eq!(schedule.next_deadline(at(50), at(80), interval), at(80));
+        assert_eq!(schedule.next_deadline(at(80), at(83), interval), at(90));
+        let days_later = 2 * 24 * 60 * 60 * 1000;
+        assert_eq!(
+            schedule.next_deadline(at(90), at(days_later + 7), interval),
+            at(days_later + 10)
+        );
+    }
+    #[test]
+    fn idle_transitions_and_wakes_reset_the_schedule_phase() {
+        let start = Instant::now();
+        let at = |ms| start + Duration::from_millis(ms);
+        let active = Duration::from_millis(10);
+        let idle = Duration::from_millis(500);
+        let mut schedule = TickSchedule {
+            slot: start,
+            interval: None,
+        };
+        assert_eq!(schedule.next_deadline(at(0), at(3), active), at(10));
+        assert_eq!(schedule.next_deadline(at(10), at(13), idle), at(510));
+        schedule.wake(at(25));
+        assert_eq!(schedule.next_deadline(at(25), at(28), active), at(35));
+        // A queued wake starts a new phase even when the interval is unchanged.
+        schedule.wake(at(29));
+        assert_eq!(schedule.next_deadline(at(29), at(31), active), at(39));
+    }
     fn hit(e: &Engine, x: f64, y: f64) -> Option<Target> {
         e.release_target(
             x,
@@ -1318,9 +1421,9 @@ mod tests {
             fraction: 0.5,
             exterior: true,
         });
-        assert_eq!(e.tick_interval(), Duration::from_millis(33));
+        assert_eq!(e.tick_interval(), ACTIVE_TICK_INTERVAL);
         e.motion = Some(motion);
-        assert_eq!(e.tick_interval(), Duration::from_millis(16));
+        assert_eq!(e.tick_interval(), ACTIVE_TICK_INTERVAL);
     }
     #[test]
     fn animated_reorientation_waits_until_the_dom_corners_coincide() {
@@ -1596,6 +1699,7 @@ mod tests {
             resume_motion: None,
         };
         e.drag = Some(new_drag());
+        assert_eq!(e.tick_interval(), ACTIVE_TICK_INTERVAL);
         // Mouse has moved 20px after the actual click was released.
         assert!(e.sample_drag(screen, 466., 346., false, frame).is_none());
         assert!(!e.view.last_drag_moved);

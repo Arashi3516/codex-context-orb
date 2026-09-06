@@ -1,6 +1,6 @@
 # Context Orb · UI / UX
 
-版本：0.4.2 · 2026-09-06
+版本：0.4.3 · 2026-09-06
 
 悬浮球提供安静入口，面板把脏度线索、上下文容量与可选压缩次数分开。核心颜色表示检查依据中的风险，外环表示有来源的容量读数；真实读数缺失时使用中性虚线环和“未接入”，不以 0% 替代。
 
@@ -35,9 +35,11 @@ macOS 通过系统提供的 `com.openai.codex` bundle ID 识别 Codex。Windows 
 
 按下时保留抓取位置，位移达到 4 logical px 后才移动。拖中自由跟随，松手以 120–220 ms 的减速过渡停靠，不回弹；系统「减少动态效果」开启时直接停靠。过渡可被下一次按下中断，单击继续原停靠动作。首次停靠优先贴窗口外侧，空间不足则贴内侧。最前方窗口不在允许范围时回到屏幕，不穿过遮挡去选择背后窗口；macOS Dock 的系统桌面表面不作为应用遮挡层。
 
-已停靠时按窗口 ID 和所属进程持续跟随，每 33 ms 只采样这一个窗口；窗口缩放保持沿边的相对位置，内外侧保持到原侧无法容纳才切换。拖动期间暂停跟随，松手后重新绑定；目标关闭、最小化、身份改变或不再符合设置时回到屏幕。拖动与有限停靠动画按约 16 ms 调度，无跟随目标时回到 500 ms 空闲检查。原生只读取可见窗口边界、可见性与所属应用身份，不读取标题、终端、对话或截图，也不移动其他应用。
+已停靠时按窗口 ID 和所属进程持续跟随，只采样这一个窗口；窗口缩放保持沿边的相对位置，内外侧保持到原侧无法容纳才切换。拖动期间暂停跟随，松手后重新绑定；目标关闭、最小化、身份改变或不再符合设置时回到屏幕。拖动、跟随与有限停靠动画以 60 Hz 的固定时点调度，将主线程工作时间计入周期；错过的帧跳过，不累积补帧。无跟随目标时回到 500 ms 空闲检查。原生只读取可见窗口边界、可见性与所属应用身份，不读取标题、终端、对话或截图，也不移动其他应用。
 
-原生移动只写 Orb 自己的窗口。macOS 首次显示前，仅对登记的 Orb 实例取消主文档窗口资格，其他实例沿用原方法；不改系统观察类链、键盘资格或事件分发。同时关闭窗口/背景拖动并禁止全屏平铺。Windows 清除自己的可缩放和最大化样式并刷新窗口边框，移动采用物理像素取整。系统在空闲时重定位 Orb，下一次检查会恢复原停靠位置，展开收起也使用原位置。保留 Dock/任务栏入口，不修改系统全局平铺或 Snap 设置。主窗口资格调整是否排除 macOS 桌面边缘平铺仍需真实鼠标验收；全屏平铺属性本身不足以证明这一点。参考：[Apple 主窗口资格](https://developer.apple.com/documentation/appkit/nswindow/canbecomemain)、[Apple 窗口移动属性](https://developer.apple.com/documentation/appkit/nswindow/ismovable)、[Windows 窗口样式](https://learn.microsoft.com/en-us/windows/win32/winmsg/window-styles)、[Windows 窗口定位](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwindowpos)。
+原生移动只写 Orb 自己的窗口。macOS 关闭原生窗口/背景拖动并禁止全屏平铺；Windows 清除自己的可缩放和最大化样式并刷新窗口边框，移动采用物理像素取整。系统在空闲时重定位 Orb，下一次检查会恢复原停靠位置，展开收起也使用原位置。保留 Dock/任务栏入口，不修改系统全局平铺或 Snap 设置。全屏平铺属性不能单独证明桌面拖边平铺已排除。参考：[Apple 窗口移动属性](https://developer.apple.com/documentation/appkit/nswindow/ismovable)、[Apple 全屏平铺属性](https://developer.apple.com/documentation/appkit/nswindow/collectionbehavior-swift.struct/fullscreendisallowstiling)、[Windows 窗口样式](https://learn.microsoft.com/en-us/windows/win32/winmsg/window-styles)、[Windows 窗口定位](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwindowpos)。
+
+Rectangle 的拖边识别会观察窗口位置变化，Orb 自行移动也可能被识别。使用 Rectangle 时，为 Context Orb 启用其「Ignore」选项；默认同时停止对该应用的拖边吸附。此设置由用户配置，Orb 产品代码不修改第三方设置。v0.4.3 不替换原生类方法、KVO 类链、键盘资格或事件分发。[Rectangle 官方说明](https://github.com/rxhanson/Rectangle#ignore-an-app) · [v0.95 拖动监听](https://github.com/rxhanson/Rectangle/blob/v0.95/Rectangle/Snapping/SnappingManager.swift) · [应用忽略行为](https://github.com/rxhanson/Rectangle/blob/v0.95/Rectangle/ApplicationToggle.swift)。
 
 ## 窗口与验收
 
