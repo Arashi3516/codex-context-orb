@@ -352,7 +352,7 @@ export default function App() {
       role="dialog" aria-label="会话状态" onKeyDown={event => { if (event.key === 'Escape') closePanel() }}
     >
       <header className="panel-top">
-        <div className="panel-brand"><OrbMark /><span>Context Orb</span><span className="version-pill">v0.4.4 预览</span></div>
+        <div className="panel-brand"><OrbMark /><span>Context Orb</span><span className="version-pill">v0.4.5 预览</span></div>
         <button className="icon-button" aria-label="收起面板" onClick={closePanel}><X size={17} /></button>
       </header>
       {view !== 'overview' && <button className="back-button" onClick={() => { setView('overview'); setHistoricalReport(null) }}><ArrowLeft size={14} />返回概览</button>}
@@ -468,7 +468,7 @@ export default function App() {
         <h2>按你的习惯停靠</h2><p className="subview-intro">拖动后松手，自动停靠最近的边框。</p>
         <fieldset className="magnet-settings"><legend><Magnet size={14} />窗口吸附</legend>
           <div className="window-modes">{(['codex', 'off', 'all'] as WindowMagnetMode[]).map(mode => <label key={mode} className={magnetPreferences.windowMode === mode ? 'selected' : ''}><input type="radio" name="window-magnet" aria-label={mode === 'codex' ? '仅限 Codex 窗口' : WINDOW_MODE_LABELS[mode]} disabled={magnetControlsDisabled} checked={magnetPreferences.windowMode === mode} onChange={() => void changeMagnet({ windowMode: mode })} /><span>{WINDOW_MODE_LABELS[mode]}</span></label>)}</div>
-          <p>{magnetPreferences.windowMode === 'codex' ? '在 Codex 窗口内或球贴到边框时松手，平滑停靠并随窗口移动。' : magnetPreferences.windowMode === 'all' ? '在可见窗口内或球贴到边框时松手，平滑停靠并随窗口移动。' : '松手后，平滑停靠当前屏幕最近的边缘。'}{magnetPreferences.windowMode !== 'off' && '其余位置停靠屏幕边缘。'}</p>
+          <p>{magnetPreferences.windowMode === 'codex' ? '在 Codex 窗口内或球贴到边框时松手，停靠窗口内侧并随窗口移动。' : magnetPreferences.windowMode === 'all' ? '在可见窗口内或球贴到边框时松手，停靠窗口内侧并随窗口移动。' : '松手后，平滑停靠当前屏幕最近的边缘。'}{magnetPreferences.windowMode !== 'off' && '其余位置停靠屏幕边缘。'}</p>
           {isNative && magnetState?.capabilities.reason && <p className="magnet-caveat">窗口信息暂不可用，请确认桌面会话与显示器可用后重试。</p>}
           {isNative && magnetState?.capabilities.codexGui === 'unavailable' && magnetPreferences.windowMode === 'codex' && <p className="magnet-caveat">此平台暂不能可靠识别 Codex，可切换为「所有窗口」。</p>}
           {!isNative && <small>此处演示网页内拖拽；桌面版使用真实窗口边界。</small>}

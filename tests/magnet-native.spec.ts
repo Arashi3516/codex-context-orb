@@ -74,6 +74,26 @@ test('each native layout corner keeps the orb fixed and the panel inside short v
       invoke: async (command: string) => command.startsWith('read_') ? [] : structuredClone(state),
     }
   })
+  for (const corner of ['left-top', 'right-top', 'left-bottom', 'right-bottom']) {
+    await page.setViewportSize({ width: 92, height: 92 })
+    await page.goto(`/?surface=orb&corner=${corner}`)
+    const orb = page.locator('.orb-button')
+    await orb.focus()
+    const paint = await orb.evaluate(element => {
+      const box = element.getBoundingClientRect()
+      const style = getComputedStyle(element)
+      const outside = Math.max(0, parseFloat(style.outlineOffset) + parseFloat(style.outlineWidth))
+      return { focused: element.matches(':focus-visible'), width: parseFloat(style.outlineWidth),
+        left: box.left - outside, top: box.top - outside,
+        right: box.right + outside, bottom: box.bottom + outside }
+    })
+    expect(paint.focused).toBe(true)
+    expect(paint.width).toBeGreaterThan(0)
+    expect(paint.left).toBeGreaterThanOrEqual(0)
+    expect(paint.top).toBeGreaterThanOrEqual(0)
+    expect(paint.right).toBeLessThanOrEqual(92)
+    expect(paint.bottom).toBeLessThanOrEqual(92)
+  }
   for (const height of [690, 360]) for (const corner of ['left-top', 'right-top', 'left-bottom', 'right-bottom']) {
     await page.setViewportSize({ width: 382, height })
     await page.goto(`/?surface=orb&corner=${corner}`)

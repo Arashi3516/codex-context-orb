@@ -167,7 +167,10 @@ test('release always docks the orb and opening the panel preserves its position'
   await expect(page.locator('.orb-dock')).toHaveClass(/is-snapped/)
   await page.locator('.orb-dock').evaluate(async element => { await Promise.all(element.getAnimations().map(animation => animation.finished)) })
   box = (await orb.boundingBox())!
-  expect(Math.abs(box.y + box.height - target.y)).toBeLessThan(2)
+  expect(Math.abs(box.y - target.y)).toBeLessThan(2)
+  expect(box.x).toBeGreaterThanOrEqual(target.x)
+  expect(box.x + box.width).toBeLessThanOrEqual(target.x + target.width)
+  expect(box.y + box.height).toBeLessThanOrEqual(target.y + target.height)
   await expect(page.locator('#orb-state-description')).toContainText('已吸附窗口边缘')
   const panel = (await page.getByTestId('orb-panel').boundingBox())!
   expect(panel.x).toBeGreaterThanOrEqual(stage.x)

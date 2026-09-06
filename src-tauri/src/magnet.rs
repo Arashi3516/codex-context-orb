@@ -600,6 +600,37 @@ impl Engine {
         }
         self.last_follow_sample = Some((w.id, w.owner_pid, w.rect));
     }
+    fn screen_for_target(
+        screens: &[Screen],
+        target: Target,
+        preferred: Screen,
+        x: f64,
+        y: f64,
+    ) -> Screen {
+        let fits = |screen: &Screen| {
+            let size = platform::coordinate(92.0 * screen.units_per_logical_pixel);
+            geometry::target_interior(
+                Rect {
+                    x: 0.,
+                    y: 0.,
+                    width: size,
+                    height: size,
+                },
+                screen.work_area,
+                target.rect,
+            )
+            .is_some()
+        };
+        if fits(&preferred) {
+            return preferred;
+        }
+        screens
+            .iter()
+            .copied()
+            .filter(fits)
+            .reduce(|a, b| geometry::nearest_screen(&[a, b], x, y).unwrap_or(a))
+            .unwrap_or(preferred)
+    }
     fn follow_placement(
         &mut self,
         w: OtherWindow,
@@ -619,11 +650,8 @@ impl Engine {
             platform::coordinate(92.0 * screen.units_per_logical_pixel),
             screen.work_area,
         )?;
-        if x.or(y).is_some_and(|l| l.source == Source::Window) {
-            self.attachment = Some(attachment.with_placement(orb, target));
-        }
         // A temporarily clipped edge has no contact latch, but keeps its target
-        // and placement preference so moving back restores the same attachment.
+        // and preferred position so moving back restores the same attachment.
         self.note_follow_motion(w, Instant::now());
         if let Some(cached) = self.windows.iter_mut().find(|old| old.id == w.id) {
             *cached = w;
@@ -661,6 +689,16 @@ impl Engine {
             };
             let screen = geometry::nearest_screen(&desktop.screens, point.0, point.1)
                 .ok_or("No usable display")?;
+            let screen = Self::screen_for_target(
+                &desktop.screens,
+                Target {
+                    id: w.id,
+                    rect: w.rect,
+                },
+                screen,
+                point.0,
+                point.1,
+            );
             if let Some((orb, x, y)) = self.follow_placement(w, screen) {
                 if let Some(motion) = self.motion.as_mut() {
                     motion.to = orb;
@@ -1078,24 +1116,26 @@ pub async fn end_magnetic_drag(
         if !cursor_x.is_finite() || !cursor_y.is_finite() {
             return Err("Pointerup position is unavailable".into());
         }
-        let screen = geometry::nearest_screen(&desktop.screens, cursor_x, cursor_y)
+        let mut screen = geometry::nearest_screen(&desktop.screens, cursor_x, cursor_y)
             .ok_or("No usable display")?;
-        let orb = engine.orb(drag.widget_at(screen, cursor_x, cursor_y), screen);
+        let mut orb = engine.orb(drag.widget_at(screen, cursor_x, cursor_y), screen);
         if engine.view.preferences.window_mode != WindowMode::Off {
             engine.refresh_windows();
         }
         let target = engine.release_target(cursor_x, cursor_y, orb);
+        if let Some(target) = target {
+            screen =
+                Engine::screen_for_target(&desktop.screens, target, screen, cursor_x, cursor_y);
+            orb = engine.orb(drag.widget_at(screen, cursor_x, cursor_y), screen);
+        }
+        let size = platform::coordinate(92.0 * screen.units_per_logical_pixel);
+        let target = target.filter(|_| orb.width == size && orb.height == size);
         let (docked, x, y) =
             geometry::release_dock(orb, screen.work_area, target, cursor_x, cursor_y)
                 .ok_or("Release geometry is unavailable")?;
         engine.reset_follow_pacing();
         engine.attachment = target
-            .filter(|_| {
-                [x, y]
-                    .into_iter()
-                    .flatten()
-                    .any(|l| l.source == Source::Window)
-            })
+            .filter(|_| docked.width == orb.width && docked.height == orb.height)
             .and_then(|target| geometry::from_release(docked, target, cursor_x, cursor_y));
         engine.attachment_owner = engine.attachment.and_then(|a| {
             engine
@@ -1225,7 +1265,6 @@ mod tests {
             target_id: 7,
             edge: Side::Right,
             fraction: 0.5,
-            exterior: true,
         });
         e.note_follow_motion(target(100.), at(0));
         assert_eq!(e.tick_interval_at(at(0)), ACTIVE_TICK_INTERVAL);
@@ -1487,7 +1526,107 @@ mod tests {
         assert!(hit(&e, 400., 300.).is_none());
     }
     #[test]
-    fn following_a_temporarily_clipped_edge_keeps_its_owner_and_placement_preference() {
+    fn a_neighbor_display_is_used_only_when_the_preferred_target_area_cannot_fit() {
+        let a = Screen {
+            work_area: Rect {
+                x: 0.,
+                y: 0.,
+                width: 1000.,
+                height: 800.,
+            },
+            units_per_logical_pixel: 1.,
+        };
+        let b = Screen {
+            work_area: Rect {
+                x: 1000.,
+                ..a.work_area
+            },
+            ..a
+        };
+        let target = Target {
+            id: 7,
+            rect: Rect {
+                x: 691.,
+                y: 100.,
+                width: 400.,
+                height: 400.,
+            },
+        };
+        // The nearest edge is on B, but its visible strip is only 91px wide.
+        let selected = Engine::screen_for_target(&[a, b], target, b, 1091., 300.);
+        assert_eq!(selected.work_area, a.work_area);
+        let (orb, x, y) = geometry::release_dock(
+            Rect {
+                x: 1044.,
+                y: 254.,
+                width: 92.,
+                height: 92.,
+            },
+            selected.work_area,
+            Some(target),
+            1090.,
+            300.,
+        )
+        .unwrap();
+        assert!(target.rect.contains_rect(orb));
+        assert!(selected.work_area.contains_rect(orb));
+        assert_eq!((x, y), (None, None));
+        let binding = geometry::from_release(orb, target, 1090., 300.).unwrap();
+        assert_eq!(
+            geometry::follow_orb(binding, target, 92., selected.work_area)
+                .unwrap()
+                .0,
+            orb
+        );
+
+        let just_fits = Target {
+            rect: Rect {
+                x: 692.,
+                ..target.rect
+            },
+            ..target
+        };
+        assert_eq!(
+            Engine::screen_for_target(&[a, b], just_fits, b, 1092., 300.).work_area,
+            b.work_area
+        );
+        let negative = Screen {
+            work_area: Rect {
+                x: -1000.,
+                ..a.work_area
+            },
+            ..a
+        };
+        let scaled = Screen {
+            units_per_logical_pixel: 2.,
+            ..a
+        };
+        let wide = Target {
+            rect: Rect {
+                x: -50.,
+                ..target.rect
+            },
+            ..target
+        };
+        assert_eq!(
+            Engine::screen_for_target(&[negative, scaled], wide, negative, -50., 300.)
+                .units_per_logical_pixel,
+            2.
+        );
+        let narrow = Target {
+            rect: Rect {
+                width: 200.,
+                ..wide.rect
+            },
+            ..wide
+        };
+        assert_eq!(
+            Engine::screen_for_target(&[negative, scaled], narrow, negative, -50., 300.).work_area,
+            negative.work_area
+        );
+    }
+    #[test]
+    fn following_a_temporarily_clipped_or_small_target_keeps_its_binding() {
         let screen = Screen {
             work_area: Rect {
                 x: 0.,
@@ -1497,7 +1636,7 @@ mod tests {
             },
             units_per_logical_pixel: 1.,
         };
-        let target = |x| OtherWindow {
+        let target = |x, width| OtherWindow {
             id: 7,
             owner_pid: 10,
             codex: true,
@@ -1505,107 +1644,84 @@ mod tests {
             rect: Rect {
                 x,
                 y: 100.,
-                width: 400.,
+                width,
                 height: 400.,
             },
         };
-        for path in [
-            &[
-                (500., 900., true, true),
-                (600., 908., false, true),
-                (601., 908., false, false),
-                (500., 808., false, true),
-            ][..],
-            &[
-                (500., 900., true, true),
-                (601., 908., true, false),
-                (500., 900., true, true),
-            ][..],
+        let mut e = Engine::default();
+        let binding = WindowAttachment {
+            target_id: 7,
+            edge: Side::Right,
+            fraction: 0.5,
+        };
+        e.attachment = Some(binding);
+        e.attachment_owner = Some(10);
+        e.windows = vec![target(500., 400.)];
+        for (current, orb_x, contact, contained) in [
+            (target(500., 400.), 808., true, true),
+            (target(600., 400.), 908., true, true),
+            (target(601., 400.), 908., false, true),
+            (target(909., 400.), 908., false, false),
+            (target(908., 400.), 908., false, true),
+            (target(500., 91.), 499., false, false),
+            (target(500., 400.), 808., true, true),
         ] {
-            let mut e = Engine::default();
-            e.attachment = Some(WindowAttachment {
-                target_id: 7,
-                edge: Side::Right,
-                exterior: true,
-                fraction: 0.5,
-            });
-            e.attachment_owner = Some(10);
-            e.windows = vec![target(500.)];
-            for &(window_x, orb_x, exterior, contact) in path {
-                let (orb, x, y) = e.follow_placement(target(window_x), screen).unwrap();
-                assert_eq!(
-                    orb,
-                    Rect {
-                        x: orb_x,
-                        y: 254.,
-                        width: 92.,
-                        height: 92.
-                    }
-                );
-                assert_eq!(x.or(y).is_some(), contact);
-                assert_eq!(
-                    e.attachment,
-                    Some(WindowAttachment {
-                        target_id: 7,
-                        edge: Side::Right,
-                        exterior,
-                        fraction: 0.5,
-                    })
-                );
-                assert_eq!(e.attachment_owner, Some(10));
-                assert_eq!(e.windows[0].rect, target(window_x).rect);
-            }
-            // Reused IDs and policy changes still reject this follow path.
-            assert!(e
-                .follow_placement(
-                    OtherWindow {
-                        owner_pid: 20,
-                        ..target(500.)
-                    },
-                    screen
-                )
-                .is_none());
-            assert!(e
-                .follow_placement(
-                    OtherWindow {
-                        id: 8,
-                        ..target(500.)
-                    },
-                    screen
-                )
-                .is_none());
-            assert!(e
-                .follow_placement(
-                    OtherWindow {
-                        dockable: false,
-                        ..target(500.)
-                    },
-                    screen
-                )
-                .is_none());
-            e.view.preferences.window_mode = WindowMode::Off;
-            assert!(e.follow_placement(target(500.), screen).is_none());
-            e.view.preferences.window_mode = WindowMode::Codex;
-            assert!(e
-                .follow_placement(
-                    OtherWindow {
-                        codex: false,
-                        ..target(500.)
-                    },
-                    screen
-                )
-                .is_none());
-            e.view.preferences.window_mode = WindowMode::All;
-            assert!(e
-                .follow_placement(
-                    OtherWindow {
-                        codex: false,
-                        ..target(500.)
-                    },
-                    screen
-                )
-                .is_some());
+            let (orb, x, y) = e.follow_placement(current, screen).unwrap();
+            assert_eq!(
+                orb,
+                Rect {
+                    x: orb_x,
+                    y: 254.,
+                    width: 92.,
+                    height: 92.
+                }
+            );
+            assert_eq!(x.or(y).is_some(), contact);
+            assert_eq!(current.rect.contains_rect(orb), contained);
+            assert!(screen.work_area.contains_rect(orb));
+            assert_eq!(e.attachment, Some(binding));
+            assert_eq!(e.attachment_owner, Some(10));
+            assert_eq!(e.windows[0].rect, current.rect);
         }
+        // Reused IDs and policy changes still reject this follow path.
+        for rejected in [
+            OtherWindow {
+                owner_pid: 20,
+                ..target(500., 400.)
+            },
+            OtherWindow {
+                id: 8,
+                ..target(500., 400.)
+            },
+            OtherWindow {
+                dockable: false,
+                ..target(500., 400.)
+            },
+        ] {
+            assert!(e.follow_placement(rejected, screen).is_none());
+        }
+        e.view.preferences.window_mode = WindowMode::Off;
+        assert!(e.follow_placement(target(500., 400.), screen).is_none());
+        e.view.preferences.window_mode = WindowMode::Codex;
+        assert!(e
+            .follow_placement(
+                OtherWindow {
+                    codex: false,
+                    ..target(500., 400.)
+                },
+                screen
+            )
+            .is_none());
+        e.view.preferences.window_mode = WindowMode::All;
+        assert!(e
+            .follow_placement(
+                OtherWindow {
+                    codex: false,
+                    ..target(500., 400.)
+                },
+                screen
+            )
+            .is_some());
     }
     #[test]
     fn a_visible_corner_edge_does_not_authorize_the_occluded_nearest_edge() {
@@ -1745,7 +1861,6 @@ mod tests {
             target_id: 1,
             edge: Side::Left,
             fraction: 0.5,
-            exterior: true,
         });
         assert_eq!(e.tick_interval(), ACTIVE_TICK_INTERVAL);
         e.motion = Some(motion);
@@ -2031,7 +2146,6 @@ mod tests {
             target_id: 7,
             edge: Side::Right,
             fraction: 0.5,
-            exterior: true,
         });
         e.fast_follow_until = Some(now + MOVING_TARGET_HOLD);
         assert_eq!(e.tick_interval_at(now), ACTIVE_TICK_INTERVAL);
@@ -2147,7 +2261,7 @@ mod tests {
     fn window_contacts_have_a_bounded_refresh_and_missing_targets_clear() {
         let mut e = Engine::default();
         let widget = Rect {
-            x: 408.,
+            x: 500.,
             y: 300.,
             width: 92.,
             height: 92.,

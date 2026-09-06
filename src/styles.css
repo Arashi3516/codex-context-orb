@@ -187,6 +187,7 @@ h1 { font-size: clamp(45px, 4.2vw, 64px); line-height: 1.29; font-weight: 550; l
 .orb-bottom-row { display: flex; align-items: center; gap: 10px; }
 .resting-caption { display: flex; align-items: center; gap: 10px; font-size: 11px; color: var(--muted); background: var(--surface); border: 1px solid var(--border); border-radius: 9px; padding: 8px 10px; box-shadow: 0 4px 16px #18351a08; }
 .orb-button { width: 80px; height: 80px; border: 0; background: transparent; border-radius: 50%; display: grid; place-items: center; position: relative; padding: 0; touch-action: none; outline-offset: 4px; }
+.orb-button:focus-visible { outline-offset: 2px; }
 .orb-ring { width: 80px; height: 80px; position: absolute; inset: 0; transform: rotate(-90deg); pointer-events: none; }
 .orb-ring circle { fill: none; stroke-width: 1.7; }
 .orb-ring-base { stroke: color-mix(in srgb, var(--capacity) 18%, transparent); }

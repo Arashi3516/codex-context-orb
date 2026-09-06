@@ -48,23 +48,27 @@ export function dockPreview(rect: Rect, area: Rect, windows: Rect[], prefs: Magn
     { side: 'top', distance: Math.abs(cursor.y - r.y) }, { side: 'bottom', distance: Math.abs(cursor.y - r.y - r.height) },
   ] as const).slice().sort((a, b) => a.distance - b.distance)[0].side
   const clamp = (n: number, min: number, max: number) => Math.max(min, Math.min(max, n))
-  const fit = (r: Rect, side: string, outside: boolean): Rect => {
-    let x = clamp(rect.x, area.x, area.x + area.width - rect.width)
-    let y = clamp(rect.y, area.y, area.y + area.height - rect.height)
-    if (side === 'left') x = r.x - (outside ? rect.width : 0)
-    if (side === 'right') x = r.x + r.width - (outside ? 0 : rect.width)
-    if (side === 'top') y = r.y - (outside ? rect.height : 0)
-    if (side === 'bottom') y = r.y + r.height - (outside ? 0 : rect.height)
-    return { ...rect, x, y }
+  const fit = (r: Rect, side: string, bounds = area): Rect => {
+    let x = clamp(rect.x, bounds.x, bounds.x + bounds.width - rect.width)
+    let y = clamp(rect.y, bounds.y, bounds.y + bounds.height - rect.height)
+    if (side === 'left') x = r.x
+    if (side === 'right') x = r.x + r.width - rect.width
+    if (side === 'top') y = r.y
+    if (side === 'bottom') y = r.y + r.height - rect.height
+    return { ...rect, x: clamp(x, bounds.x, bounds.x + bounds.width - rect.width),
+      y: clamp(y, bounds.y, bounds.y + bounds.height - rect.height) }
   }
-  const fits = (r: Rect) => r.x >= area.x && r.y >= area.y && r.x + r.width <= area.x + area.width && r.y + r.height <= area.y + area.height
+  const fits = (r: Rect, bounds: Rect) => r.x >= bounds.x && r.y >= bounds.y && r.x + r.width <= bounds.x + bounds.width && r.y + r.height <= bounds.y + bounds.height
   if (target) {
     const side = edge(target)
-    for (const outside of [true, false]) {
-      const docked = fit(target, side, outside)
-      if (fits(docked)) return { rect: docked, kind: 'window' as const, side }
+    const x = Math.max(area.x, target.x), y = Math.max(area.y, target.y)
+    const visible = { x, y, width: Math.min(area.x + area.width, target.x + target.width) - x,
+      height: Math.min(area.y + area.height, target.y + target.height) - y }
+    if (visible.width >= rect.width && visible.height >= rect.height) {
+      const docked = fit(target, side, visible)
+      if (fits(docked, visible)) return { rect: docked, kind: 'window' as const, side }
     }
   }
   const side = edge(area)
-  return { rect: fit(area, side, false), kind: 'screen' as const, side }
+  return { rect: fit(area, side), kind: 'screen' as const, side }
 }
