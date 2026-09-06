@@ -1,0 +1,2 @@
+# This fixture's exact bytes are part of the shared Python/Rust/TypeScript receipt.
+plugins/codex-context-orb/scripts/fixtures/evidence-workspace/status.txt text eol=lf

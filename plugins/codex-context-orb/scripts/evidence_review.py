@@ -292,8 +292,9 @@ def _plain_directory(path: Path, create: bool = False) -> bool:
     return True
 
 
-def _signature(metadata: os.stat_result) -> tuple:
-    return (metadata.st_dev, metadata.st_ino, metadata.st_size, metadata.st_mtime_ns, metadata.st_ctime_ns)
+def _signature(metadata: os.stat_result, *, include_ctime: bool = True) -> tuple:
+    signature = (metadata.st_dev, metadata.st_ino, metadata.st_size, metadata.st_mtime_ns)
+    return signature + (metadata.st_ctime_ns,) if include_ctime else signature
 
 
 def _open_plain(path: Path, flags: int, mode: int = 0o600) -> int:
@@ -312,6 +313,7 @@ def _open_plain(path: Path, flags: int, mode: int = 0o600) -> int:
 
 
 def _read_plain(path: Path, maximum: int) -> bytes:
+    path_before = path.lstat()
     descriptor = _open_plain(path, os.O_RDONLY)
     with os.fdopen(descriptor, "rb") as handle:
         before = os.fstat(handle.fileno())
@@ -320,7 +322,13 @@ def _read_plain(path: Path, maximum: int) -> bytes:
         raw = handle.read(maximum + 1)
         after = os.fstat(handle.fileno())
         current = path.lstat()
-        if len(raw) > maximum or _is_link(current) or _signature(before) != _signature(after) or _signature(after) != _signature(current):
+        # CPython 3.12 on Windows exposes creation time through lstat().ctime,
+        # but metadata change time through fstat().ctime. Preserve both complete
+        # before/after checks; compare only shared semantics across the two APIs.
+        if (len(raw) > maximum or _is_link(current)
+                or _signature(before) != _signature(after)
+                or _signature(path_before) != _signature(current)
+                or _signature(after, include_ctime=False) != _signature(current, include_ctime=False)):
             raise EvidenceError("File changed during the bounded read")
     return raw
 

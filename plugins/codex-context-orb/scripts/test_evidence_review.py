@@ -253,6 +253,79 @@ class EvidenceReviewTests(unittest.TestCase):
         self.assertIsNone(report["sources"][1]["sha256"])
         self.assertEqual(report["probes"][0]["result"], "unknown")
 
+    def test_atomic_rename_read_accepts_distinct_path_and_handle_ctime(self):
+        temporary = self.workspace / "before-rename.txt"
+        destination = self.workspace / "after-rename.txt"
+        raw = b"synthetic atomic rename receipt\n"
+        temporary.write_bytes(raw)
+        os.replace(temporary, destination)
+        original = Path.lstat
+        path_ctime = original(destination).st_ctime_ns - 1_000_000
+
+        def creation_time(path, *args, **kwargs):
+            metadata = original(path, *args, **kwargs)
+            if path != destination:
+                return metadata
+            fields = {name: getattr(metadata, name) for name in dir(metadata) if name.startswith("st_")}
+            # CPython 3.12 Windows lstat reports creation time, while fstat
+            # reports metadata change time, which a rename can advance.
+            fields["st_ctime_ns"] = path_ctime
+            return SimpleNamespace(**fields)
+
+        with patch.object(Path, "lstat", creation_time):
+            self.assertEqual(evidence._read_plain(destination, len(raw)), raw)
+
+    def test_read_still_rejects_handle_changes_and_path_replacement(self):
+        destination = self.workspace / "status.txt"
+        original_fstat, original_lstat = os.fstat, Path.lstat
+        path_ctime = original_lstat(destination).st_ctime_ns - 1_000_000
+        mutations = (("handle", "st_ctime_ns"), ("handle", "st_mtime_ns"), ("handle", "st_size"),
+                     ("path", "st_ctime_ns"), ("path", "st_mtime_ns"), ("path", "st_size"),
+                     ("path", "st_ino"), ("path", "st_file_attributes"))
+        for target, field in mutations:
+            calls = 0
+
+            def metadata_copy(metadata):
+                return {name: getattr(metadata, name) for name in dir(metadata) if name.startswith("st_")}
+
+            def handle_stat(descriptor):
+                nonlocal calls
+                calls += 1
+                metadata = original_fstat(descriptor)
+                if calls == 3 and target == "handle":
+                    fields = metadata_copy(metadata)
+                    fields[field] += 1
+                    return SimpleNamespace(**fields)
+                return metadata
+
+            def path_stat(path, *args, **kwargs):
+                metadata = original_lstat(path, *args, **kwargs)
+                if path != destination:
+                    return metadata
+                fields = metadata_copy(metadata)
+                fields["st_ctime_ns"] = path_ctime
+                if calls >= 3 and target == "path":
+                    fields[field] = 0x400 if field == "st_file_attributes" else fields[field] + 1
+                return SimpleNamespace(**fields)
+
+            with self.subTest(target=target, field=field), patch.object(os, "fstat", handle_stat), patch.object(Path, "lstat", path_stat):
+                with self.assertRaisesRegex(evidence.EvidenceError, "changed during"):
+                    evidence._read_plain(destination, evidence.MAX_ARTIFACT_BYTES)
+
+    def test_actual_atomic_rename_metadata_can_be_read(self):
+        temporary = self.workspace / "native-rename.tmp"
+        destination = self.workspace / "native-rename.json"
+        raw = b"synthetic native metadata probe\n"
+        temporary.write_bytes(raw)
+        os.replace(temporary, destination)
+        try:
+            self.assertEqual(evidence._read_plain(destination, len(raw)), raw)
+        except evidence.EvidenceError as error:
+            with destination.open("rb") as handle:
+                path_stat, handle_stat = destination.lstat(), os.fstat(handle.fileno())
+            self.fail(f"Atomic rename read failed: path={evidence._signature(path_stat)!r}, "
+                      f"handle={evidence._signature(handle_stat)!r}: {error}")
+
     def test_storage_latest_exact_identity_and_eight_immutable_history_reports(self):
         self.assertIsNone(evidence.read_report(self.root, self.session, NOW))
         self.assertEqual(evidence.read_history(self.root, self.session, NOW), [])
