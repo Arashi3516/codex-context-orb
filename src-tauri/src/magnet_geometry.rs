@@ -298,7 +298,8 @@ pub fn from_release(orb: Rect, target: Target, x: f64, y: f64) -> Option<WindowA
 }
 
 /// Follow one target without changing its bound edge or chosen side unless that
-/// placement cannot fit. A missing/off-screen edge returns None.
+/// placement cannot fit. A temporarily off-screen edge clamps without a contact
+/// latch, allowing the caller to retain its binding until the edge returns.
 pub fn follow_orb(
     attachment: WindowAttachment,
     target: Target,
@@ -321,14 +322,25 @@ pub fn follow_orb(
         height: orb_size.min(area.height),
     };
     match attachment.edge {
-        Side::Left | Side::Right => {
+        Side::Left => {
+            orb.x = target.rect.x - if attachment.exterior { orb.width } else { 0.0 };
             orb.y = target.rect.y + attachment.fraction * target.rect.height - orb.height / 2.0;
         }
-        Side::Top | Side::Bottom => {
+        Side::Right => {
+            orb.x = target.rect.right() - if attachment.exterior { 0.0 } else { orb.width };
+            orb.y = target.rect.y + attachment.fraction * target.rect.height - orb.height / 2.0;
+        }
+        Side::Top => {
             orb.x = target.rect.x + attachment.fraction * target.rect.width - orb.width / 2.0;
+            orb.y = target.rect.y - if attachment.exterior { orb.height } else { 0.0 };
+        }
+        Side::Bottom => {
+            orb.x = target.rect.x + attachment.fraction * target.rect.width - orb.width / 2.0;
+            orb.y = target.rect.bottom() - if attachment.exterior { 0.0 } else { orb.height };
         }
     }
     dock_to_edge(orb, area, target, attachment.edge, attachment.exterior)
+        .or_else(|| Some((clamp(orb, area), None, None)))
 }
 
 /// Enforce one nearest edge after a moved gesture. The caller has already
@@ -696,6 +708,72 @@ mod tests {
     }
 
     #[test]
+    fn temporarily_hidden_edges_keep_tracking_the_target_along_the_screen_boundary() {
+        let area = r(0., 0., 1000., 800.);
+        for (edge, hidden, expected, returned, restored) in [
+            (
+                Side::Left,
+                r(-1., 260., 400., 300.),
+                r(0., 364., 92., 92.),
+                r(200., 260., 400., 300.),
+                r(200., 364., 92., 92.),
+            ),
+            (
+                Side::Right,
+                r(601., 260., 400., 300.),
+                r(908., 364., 92., 92.),
+                r(200., 260., 400., 300.),
+                r(508., 364., 92., 92.),
+            ),
+            (
+                Side::Top,
+                r(260., -1., 400., 300.),
+                r(414., 0., 92., 92.),
+                r(260., 200., 400., 300.),
+                r(414., 200., 92., 92.),
+            ),
+            (
+                Side::Bottom,
+                r(260., 501., 400., 300.),
+                r(414., 708., 92., 92.),
+                r(260., 200., 400., 300.),
+                r(414., 408., 92., 92.),
+            ),
+        ] {
+            let attachment = WindowAttachment {
+                target_id: 7,
+                edge,
+                exterior: false,
+                fraction: 0.5,
+            };
+            let (orb, x, y) = follow_orb(
+                attachment,
+                Target {
+                    id: 7,
+                    rect: hidden,
+                },
+                92.,
+                area,
+            )
+            .unwrap();
+            assert_eq!(orb, expected);
+            assert_eq!((x, y), (None, None));
+            let (orb, x, y) = follow_orb(
+                attachment,
+                Target {
+                    id: 7,
+                    rect: returned,
+                },
+                92.,
+                area,
+            )
+            .unwrap();
+            assert_eq!(orb, restored);
+            assert_eq!(x.or(y).unwrap().source, Source::Window);
+        }
+    }
+
+    #[test]
     fn follow_keeps_target_edge_when_switching_inside_or_losing_the_edge() {
         let area = r(0., 0., 1000., 800.);
         let target = Target {
@@ -738,16 +816,18 @@ mod tests {
             assert_eq!(lx.or(ly).unwrap().side, edge);
             assert_eq!(attachments(inside, area, &[current]), (lx, ly));
             assert_eq!(clamp(inside, area), inside);
-            assert!(follow_orb(
+            let (clipped, lx, ly) = follow_orb(
                 attachment,
                 Target {
                     rect: hidden,
                     ..target
                 },
                 92.,
-                area
+                area,
             )
-            .is_none());
+            .unwrap();
+            assert_eq!(clamp(clipped, area), clipped);
+            assert_eq!((lx, ly), (None, None));
             assert!(follow_orb(attachment, Target { id: 8, ..target }, 92., area).is_none());
         }
     }

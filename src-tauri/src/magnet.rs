@@ -12,6 +12,8 @@ use std::{
 use tauri::{Manager, WebviewWindow};
 
 const ACTIVE_TICK_INTERVAL: Duration = Duration::from_nanos(16_666_667);
+const MOVING_TARGET_INTERVAL: Duration = Duration::from_nanos(8_333_333);
+const MOVING_TARGET_HOLD: Duration = Duration::from_millis(200);
 
 struct TickSchedule {
     slot: Instant,
@@ -173,6 +175,8 @@ pub struct Engine {
     motion: Option<DockMotion>,
     reduced_motion: bool,
     last_placed: Option<Rect>,
+    last_follow_sample: Option<(u64, u32, Rect)>,
+    fast_follow_until: Option<Instant>,
 }
 pub type Magnet = Mutex<Engine>;
 
@@ -230,6 +234,8 @@ impl Default for Engine {
             motion: None,
             reduced_motion: false,
             last_placed: None,
+            last_follow_sample: None,
+            fast_follow_until: None,
         }
     }
 }
@@ -270,11 +276,17 @@ impl Engine {
             id: w.id,
             rect: w.rect,
         };
+        let mut pointer_blocked = false;
         for (index, w) in self.windows.iter().enumerate() {
             // Evaluate a foreground window's pointer and footprint together;
             // the pointer can be over a background window beside its border.
             if w.rect.contains_closed(cursor_x, cursor_y) {
-                return self.eligible(w).then(|| target(w));
+                if !pointer_blocked && self.eligible(w) {
+                    return Some(target(w));
+                }
+                // A front window blocks only later pointer hits. A separate,
+                // visible target edge can still be touched by the orb footprint.
+                pointer_blocked = true;
             }
             if !self.eligible(w) || !orb.valid() || !w.rect.valid() {
                 continue;
@@ -562,6 +574,7 @@ impl Engine {
     ) -> Result<(), String> {
         self.attachment = None;
         self.attachment_owner = None;
+        self.reset_follow_pacing();
         let (to, x, y) = geometry::release_dock(
             orb,
             screen.work_area,
@@ -572,6 +585,51 @@ impl Engine {
         .ok_or("Display recovery geometry is unavailable")?;
         self.settle(window, orb, to, screen, x, y)
     }
+    fn reset_follow_pacing(&mut self) {
+        self.last_follow_sample = None;
+        self.fast_follow_until = None;
+    }
+    fn note_follow_motion(&mut self, w: OtherWindow, now: Instant) {
+        match self.last_follow_sample {
+            Some((id, pid, previous)) if id == w.id && pid == w.owner_pid => {
+                if previous != w.rect {
+                    self.fast_follow_until = Some(now + MOVING_TARGET_HOLD);
+                }
+            }
+            _ => self.fast_follow_until = None,
+        }
+        self.last_follow_sample = Some((w.id, w.owner_pid, w.rect));
+    }
+    fn follow_placement(
+        &mut self,
+        w: OtherWindow,
+        screen: Screen,
+    ) -> Option<(Rect, Option<Latch>, Option<Latch>)> {
+        let attachment = self.attachment?;
+        if !self.eligible(&w) || self.attachment_owner != Some(w.owner_pid) {
+            return None;
+        }
+        let target = Target {
+            id: w.id,
+            rect: w.rect,
+        };
+        let (orb, x, y) = geometry::follow_orb(
+            attachment,
+            target,
+            platform::coordinate(92.0 * screen.units_per_logical_pixel),
+            screen.work_area,
+        )?;
+        if x.or(y).is_some_and(|l| l.source == Source::Window) {
+            self.attachment = Some(attachment.with_placement(orb, target));
+        }
+        // A temporarily clipped edge has no contact latch, but keeps its target
+        // and placement preference so moving back restores the same attachment.
+        self.note_follow_motion(w, Instant::now());
+        if let Some(cached) = self.windows.iter_mut().find(|old| old.id == w.id) {
+            *cached = w;
+        }
+        Some((orb, x, y))
+    }
     fn follow(
         &mut self,
         window: &WebviewWindow,
@@ -581,9 +639,7 @@ impl Engine {
             return Ok(());
         };
         let target = match platform::window(attachment.target_id) {
-            Ok(target) => {
-                target.filter(|w| self.eligible(w) && self.attachment_owner == Some(w.owner_pid))
-            }
+            Ok(target) => target,
             Err(error) => {
                 self.view.capabilities.window_edges = "unavailable";
                 self.view.capabilities.reason = Some(error);
@@ -605,25 +661,7 @@ impl Engine {
             };
             let screen = geometry::nearest_screen(&desktop.screens, point.0, point.1)
                 .ok_or("No usable display")?;
-            if let Some((orb, x, y)) = geometry::follow_orb(
-                attachment,
-                Target {
-                    id: w.id,
-                    rect: w.rect,
-                },
-                platform::coordinate(92.0 * screen.units_per_logical_pixel),
-                screen.work_area,
-            ) {
-                self.attachment = Some(attachment.with_placement(
-                    orb,
-                    Target {
-                        id: w.id,
-                        rect: w.rect,
-                    },
-                ));
-                if let Some(cached) = self.windows.iter_mut().find(|old| old.id == w.id) {
-                    *cached = w;
-                }
+            if let Some((orb, x, y)) = self.follow_placement(w, screen) {
                 if let Some(motion) = self.motion.as_mut() {
                     motion.to = orb;
                     motion.screen = screen;
@@ -657,6 +695,18 @@ impl Engine {
         Ok(())
     }
     fn tick_interval(&self) -> Duration {
+        self.tick_interval_at(Instant::now())
+    }
+    fn tick_interval_at(&self, now: Instant) -> Duration {
+        // The target read can run faster than the display while it moves, to
+        // reduce polling phase delay. Stop the burst shortly after it rests.
+        if self.drag.is_none()
+            && self.motion.is_none()
+            && self.attachment.is_some()
+            && self.fast_follow_until.is_some_and(|until| now < until)
+        {
+            return MOVING_TARGET_INTERVAL;
+        }
         if self.motion.is_some()
             || self.attachment.is_some()
             || self
@@ -749,6 +799,7 @@ impl Engine {
         self.motion = None;
         self.attachment = None;
         self.attachment_owner = None;
+        self.reset_follow_pacing();
         self.last_placed = None;
         self.view.dragging = false;
         self.view.last_error = Some(error.clone());
@@ -952,6 +1003,7 @@ pub async fn begin_magnetic_drag(
             .monitor
             .ok_or("No usable display")?
             .units_per_logical_pixel;
+        engine.reset_follow_pacing();
         engine.drag = Some(Drag {
             start_frame: desktop.rect,
             start_x: x,
@@ -1036,6 +1088,7 @@ pub async fn end_magnetic_drag(
         let (docked, x, y) =
             geometry::release_dock(orb, screen.work_area, target, cursor_x, cursor_y)
                 .ok_or("Release geometry is unavailable")?;
+        engine.reset_follow_pacing();
         engine.attachment = target
             .filter(|_| {
                 [x, y]
@@ -1150,6 +1203,82 @@ mod tests {
         // A queued wake starts a new phase even when the interval is unchanged.
         schedule.wake(at(29));
         assert_eq!(schedule.next_deadline(at(29), at(31), active), at(39));
+    }
+    #[test]
+    fn target_motion_bursts_expire_renew_and_do_not_cross_bindings() {
+        let start = Instant::now();
+        let at = |ms| start + Duration::from_millis(ms);
+        let target = |x| OtherWindow {
+            id: 7,
+            owner_pid: 10,
+            codex: true,
+            dockable: true,
+            rect: Rect {
+                x,
+                y: 100.,
+                width: 400.,
+                height: 400.,
+            },
+        };
+        let mut e = Engine::default();
+        e.attachment = Some(WindowAttachment {
+            target_id: 7,
+            edge: Side::Right,
+            fraction: 0.5,
+            exterior: true,
+        });
+        e.note_follow_motion(target(100.), at(0));
+        assert_eq!(e.tick_interval_at(at(0)), ACTIVE_TICK_INTERVAL);
+        e.note_follow_motion(target(110.), at(10));
+        assert_eq!(e.tick_interval_at(at(10)), MOVING_TARGET_INTERVAL);
+        e.note_follow_motion(target(110.), at(150));
+        assert_eq!(e.fast_follow_until, Some(at(210)));
+        e.note_follow_motion(target(120.), at(180));
+        assert_eq!(e.tick_interval_at(at(379)), MOVING_TARGET_INTERVAL);
+        assert_eq!(e.tick_interval_at(at(380)), ACTIVE_TICK_INTERVAL);
+        e.note_follow_motion(target(130.), at(400));
+        e.note_follow_motion(
+            OtherWindow {
+                id: 8,
+                ..target(500.)
+            },
+            at(410),
+        );
+        assert_eq!(e.tick_interval_at(at(410)), ACTIVE_TICK_INTERVAL);
+        e.note_follow_motion(
+            OtherWindow {
+                id: 8,
+                ..target(510.)
+            },
+            at(420),
+        );
+        e.note_follow_motion(
+            OtherWindow {
+                id: 8,
+                owner_pid: 20,
+                ..target(520.)
+            },
+            at(430),
+        );
+        assert_eq!(e.tick_interval_at(at(430)), ACTIVE_TICK_INTERVAL);
+        e.note_follow_motion(
+            OtherWindow {
+                id: 8,
+                owner_pid: 20,
+                ..target(530.)
+            },
+            at(440),
+        );
+        e.reset_follow_pacing();
+        assert_eq!(e.last_follow_sample, None);
+        assert_eq!(e.fast_follow_until, None);
+        e.note_follow_motion(target(900.), at(450));
+        assert_eq!(e.tick_interval_at(at(450)), ACTIVE_TICK_INTERVAL);
+        e.note_follow_motion(target(910.), at(460));
+        e.fail("Fixture target became unavailable".into());
+        assert_eq!(e.last_follow_sample, None);
+        assert_eq!(e.fast_follow_until, None);
+        assert_eq!(e.tick_interval_at(at(460)), Duration::from_millis(500));
     }
     fn hit(e: &Engine, x: f64, y: f64) -> Option<Target> {
         e.release_target(
@@ -1271,15 +1400,212 @@ mod tests {
         e.windows[1].rect.y = 470.;
         e.windows[1].rect.height = 38.;
         assert_eq!(hit(&e, 1386., 462.).unwrap().id, 1);
-        // A foreground popup containing the pointer still blocks, even when
-        // another part of the Codex edge remains visible under the orb.
+        // Covering the pointer does not hide the separate touched edge.
         e.windows[0].rect = Rect {
             x: 1380.,
             y: 450.,
             width: 20.,
             height: 24.,
         };
-        assert!(hit(&e, 1386., 462.).is_none());
+        assert_eq!(hit(&e, 1386., 462.).unwrap().id, 1);
+    }
+    #[test]
+    fn an_adjacent_foreground_pointer_blocker_does_not_hide_a_visible_codex_edge() {
+        let mut e = Engine::default();
+        e.windows = vec![
+            OtherWindow {
+                id: 2,
+                owner_pid: 20,
+                codex: false,
+                dockable: false,
+                rect: Rect {
+                    x: 1358.,
+                    y: 688.,
+                    width: 126.,
+                    height: 126.,
+                },
+            },
+            OtherWindow {
+                id: 1,
+                owner_pid: 10,
+                codex: true,
+                dockable: true,
+                rect: Rect {
+                    x: 46.,
+                    y: 109.,
+                    width: 1311.,
+                    height: 790.,
+                },
+            },
+        ];
+        // Real snapshot geometry, with generic owners: a front popup begins
+        // one pixel beyond the Codex edge, covering the pointer but not the edge.
+        assert_eq!(hit(&e, 1386., 751.).unwrap().id, 1);
+        e.windows[0].dockable = true;
+        assert_eq!(hit(&e, 1386., 751.).unwrap().id, 1);
+        e.view.preferences.window_mode = WindowMode::All;
+        assert_eq!(hit(&e, 1386., 751.).unwrap().id, 2);
+        e.view.preferences.window_mode = WindowMode::Codex;
+        e.windows[0].rect.x = 1356.;
+        // Moving that same front window over the touched edge must block it.
+        assert!(hit(&e, 1386., 751.).is_none());
+        e.windows[0].rect.x = 1358.;
+        e.view.preferences.window_mode = WindowMode::Off;
+        assert!(hit(&e, 1386., 751.).is_none());
+    }
+    #[test]
+    fn a_covered_pointer_cannot_select_a_background_window_without_an_edge_hit() {
+        let mut e = Engine::default();
+        e.windows = vec![
+            OtherWindow {
+                id: 2,
+                owner_pid: 20,
+                codex: false,
+                dockable: false,
+                rect: Rect {
+                    x: 380.,
+                    y: 280.,
+                    width: 40.,
+                    height: 40.,
+                },
+            },
+            OtherWindow {
+                id: 1,
+                owner_pid: 10,
+                codex: true,
+                dockable: true,
+                rect: Rect {
+                    x: 100.,
+                    y: 100.,
+                    width: 600.,
+                    height: 500.,
+                },
+            },
+        ];
+        assert!(hit(&e, 400., 300.).is_none());
+        e.view.preferences.window_mode = WindowMode::All;
+        assert!(hit(&e, 400., 300.).is_none());
+    }
+    #[test]
+    fn following_a_temporarily_clipped_edge_keeps_its_owner_and_placement_preference() {
+        let screen = Screen {
+            work_area: Rect {
+                x: 0.,
+                y: 0.,
+                width: 1000.,
+                height: 800.,
+            },
+            units_per_logical_pixel: 1.,
+        };
+        let target = |x| OtherWindow {
+            id: 7,
+            owner_pid: 10,
+            codex: true,
+            dockable: true,
+            rect: Rect {
+                x,
+                y: 100.,
+                width: 400.,
+                height: 400.,
+            },
+        };
+        for path in [
+            &[
+                (500., 900., true, true),
+                (600., 908., false, true),
+                (601., 908., false, false),
+                (500., 808., false, true),
+            ][..],
+            &[
+                (500., 900., true, true),
+                (601., 908., true, false),
+                (500., 900., true, true),
+            ][..],
+        ] {
+            let mut e = Engine::default();
+            e.attachment = Some(WindowAttachment {
+                target_id: 7,
+                edge: Side::Right,
+                exterior: true,
+                fraction: 0.5,
+            });
+            e.attachment_owner = Some(10);
+            e.windows = vec![target(500.)];
+            for &(window_x, orb_x, exterior, contact) in path {
+                let (orb, x, y) = e.follow_placement(target(window_x), screen).unwrap();
+                assert_eq!(
+                    orb,
+                    Rect {
+                        x: orb_x,
+                        y: 254.,
+                        width: 92.,
+                        height: 92.
+                    }
+                );
+                assert_eq!(x.or(y).is_some(), contact);
+                assert_eq!(
+                    e.attachment,
+                    Some(WindowAttachment {
+                        target_id: 7,
+                        edge: Side::Right,
+                        exterior,
+                        fraction: 0.5,
+                    })
+                );
+                assert_eq!(e.attachment_owner, Some(10));
+                assert_eq!(e.windows[0].rect, target(window_x).rect);
+            }
+            // Reused IDs and policy changes still reject this follow path.
+            assert!(e
+                .follow_placement(
+                    OtherWindow {
+                        owner_pid: 20,
+                        ..target(500.)
+                    },
+                    screen
+                )
+                .is_none());
+            assert!(e
+                .follow_placement(
+                    OtherWindow {
+                        id: 8,
+                        ..target(500.)
+                    },
+                    screen
+                )
+                .is_none());
+            assert!(e
+                .follow_placement(
+                    OtherWindow {
+                        dockable: false,
+                        ..target(500.)
+                    },
+                    screen
+                )
+                .is_none());
+            e.view.preferences.window_mode = WindowMode::Off;
+            assert!(e.follow_placement(target(500.), screen).is_none());
+            e.view.preferences.window_mode = WindowMode::Codex;
+            assert!(e
+                .follow_placement(
+                    OtherWindow {
+                        codex: false,
+                        ..target(500.)
+                    },
+                    screen
+                )
+                .is_none());
+            e.view.preferences.window_mode = WindowMode::All;
+            assert!(e
+                .follow_placement(
+                    OtherWindow {
+                        codex: false,
+                        ..target(500.)
+                    },
+                    screen
+                )
+                .is_some());
+        }
     }
     #[test]
     fn a_visible_corner_edge_does_not_authorize_the_occluded_nearest_edge() {
@@ -1423,7 +1749,8 @@ mod tests {
         });
         assert_eq!(e.tick_interval(), ACTIVE_TICK_INTERVAL);
         e.motion = Some(motion);
-        assert_eq!(e.tick_interval(), ACTIVE_TICK_INTERVAL);
+        e.fast_follow_until = Some(motion.started + MOVING_TARGET_HOLD);
+        assert_eq!(e.tick_interval_at(motion.started), ACTIVE_TICK_INTERVAL);
     }
     #[test]
     fn animated_reorientation_waits_until_the_dom_corners_coincide() {
@@ -1699,7 +2026,15 @@ mod tests {
             resume_motion: None,
         };
         e.drag = Some(new_drag());
-        assert_eq!(e.tick_interval(), ACTIVE_TICK_INTERVAL);
+        let now = Instant::now();
+        e.attachment = Some(WindowAttachment {
+            target_id: 7,
+            edge: Side::Right,
+            fraction: 0.5,
+            exterior: true,
+        });
+        e.fast_follow_until = Some(now + MOVING_TARGET_HOLD);
+        assert_eq!(e.tick_interval_at(now), ACTIVE_TICK_INTERVAL);
         // Mouse has moved 20px after the actual click was released.
         assert!(e.sample_drag(screen, 466., 346., false, frame).is_none());
         assert!(!e.view.last_drag_moved);

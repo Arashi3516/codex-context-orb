@@ -352,7 +352,7 @@ export default function App() {
       role="dialog" aria-label="会话状态" onKeyDown={event => { if (event.key === 'Escape') closePanel() }}
     >
       <header className="panel-top">
-        <div className="panel-brand"><OrbMark /><span>Context Orb</span><span className="version-pill">v0.4.3 预览</span></div>
+        <div className="panel-brand"><OrbMark /><span>Context Orb</span><span className="version-pill">v0.4.4 预览</span></div>
         <button className="icon-button" aria-label="收起面板" onClick={closePanel}><X size={17} /></button>
       </header>
       {view !== 'overview' && <button className="back-button" onClick={() => { setView('overview'); setHistoricalReport(null) }}><ArrowLeft size={14} />返回概览</button>}
