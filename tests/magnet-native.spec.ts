@@ -30,6 +30,7 @@ test('delayed native replies cannot turn short drags into clicks or overwrite an
   await page.mouse.move(box.x + 40, box.y + 40)
   await page.mouse.down()
   await page.mouse.move(box.x + 18, box.y + 40)
+  await expect(page.locator('.orb-dock')).toHaveClass(/is-dragging/)
   await page.mouse.up()
   // A second gesture arrives before the first native begin response.
   await page.mouse.down()
@@ -44,6 +45,10 @@ test('delayed native replies cannot turn short drags into clicks or overwrite an
   await expect(page.getByTestId('capacity-readout')).toContainText('未接入')
   await expect.poll(() => page.evaluate(() => (window as unknown as { magnetCalls: { command: string; args: { moved?: boolean } }[] }).magnetCalls.filter(call => call.command === 'end_magnetic_drag').at(-1)?.args.moved)).toBe(false)
   await expect(page.getByRole('progressbar')).toHaveCount(0)
+  await page.emulateMedia({ reducedMotion: 'reduce' })
+  await orb.click()
+  await expect.poll(() => page.evaluate(() => (window as unknown as { magnetCalls: { command: string; args: { reducedMotion?: boolean } }[] }).magnetCalls.filter(call => call.command === 'end_magnetic_drag').at(-1)?.args.reducedMotion)).toBe(true)
+  await orb.click()
   await page.getByRole('button', { name: '提醒设置' }).click()
   const all = page.getByRole('radio', { name: '所有窗口' })
   const off = page.getByRole('radio', { name: '关闭', exact: true })

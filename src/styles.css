@@ -359,6 +359,7 @@ html.widget-surface, body.widget-surface, body.widget-surface #root { min-width:
 .native-stage .dock-top .orb-panel { transform-origin: top right; }
 .native-stage .dock-top.dock-left .orb-panel { transform-origin: top left; }
 .orb-dock.preview-placed { top: 0; left: 0; right: auto; bottom: auto; width: 80px; height: 80px; }
+.orb-dock.preview-placed:not(.is-dragging) { transition: transform 180ms cubic-bezier(.2,.8,.2,1); }
 .preview-placed .orb-panel { position: absolute; right: 0; bottom: 92px; width: min(354px, var(--preview-panel-width)); max-height: var(--preview-panel-height); margin: 0; }
 .preview-placed.dock-left .orb-panel { left: 0; right: auto; transform-origin: bottom left; }
 .preview-placed.dock-top .orb-panel { top: 92px; bottom: auto; transform-origin: top right; }

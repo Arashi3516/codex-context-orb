@@ -23,8 +23,8 @@ impl Rect {
             && self.width > 0.0
             && self.height > 0.0
     }
-    pub fn contains(self, x: f64, y: f64) -> bool {
-        self.valid() && x >= self.x && x < self.right() && y >= self.y && y < self.bottom()
+    pub fn contains_closed(self, x: f64, y: f64) -> bool {
+        self.valid() && x >= self.x && x <= self.right() && y >= self.y && y <= self.bottom()
     }
 }
 
@@ -79,6 +79,33 @@ pub struct Latch {
     pub source: Source,
     pub side: Side,
     pub value: f64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WindowAttachment {
+    pub target_id: u64,
+    /// The target's edge, not the touching side of the orb.
+    pub edge: Side,
+    /// Keep the current side of the target edge until it no longer fits.
+    pub exterior: bool,
+    /// Orb-center position along the target edge. Corner contacts can extend
+    /// slightly beyond 0..1; preserving them avoids a jump on the first follow.
+    pub fraction: f64,
+}
+impl WindowAttachment {
+    /// Record an actual placement after a required switch between inside and
+    /// outside. The target edge and tangential position remain unchanged.
+    pub fn with_placement(mut self, orb: Rect, target: Target) -> Self {
+        if target.id == self.target_id && orb.valid() && target.rect.valid() {
+            self.exterior = match self.edge {
+                Side::Left => orb.x + orb.width / 2.0 < target.rect.x,
+                Side::Right => orb.x + orb.width / 2.0 > target.rect.right(),
+                Side::Top => orb.y + orb.height / 2.0 < target.rect.y,
+                Side::Bottom => orb.y + orb.height / 2.0 > target.rect.bottom(),
+            };
+        }
+        self
+    }
 }
 
 pub fn nearest_screen(screens: &[Screen], x: f64, y: f64) -> Option<Screen> {
@@ -164,7 +191,7 @@ pub fn place_widget(
     )
 }
 
-fn nearest_side(rect: Rect, x: f64, y: f64) -> Side {
+pub(crate) fn nearest_side(rect: Rect, x: f64, y: f64) -> Side {
     let dx = x - x.clamp(rect.x, rect.right());
     let dy = y - y.clamp(rect.y, rect.bottom());
     // The explicit index gives equal-distance corners a stable tie break.
@@ -182,8 +209,130 @@ fn nearest_side(rect: Rect, x: f64, y: f64) -> Side {
      .0
 }
 
-/// Enforce one nearest edge after a moved gesture. The caller selects the
-/// frontmost window at the release point before checking its eligibility.
+fn dock_to_edge(
+    mut orb: Rect,
+    area: Rect,
+    target: Target,
+    edge: Side,
+    exterior: bool,
+) -> Option<(Rect, Option<Latch>, Option<Latch>)> {
+    if !orb.valid() || !area.valid() || !target.rect.valid() {
+        return None;
+    }
+    orb = clamp(orb, area);
+    let r = target.rect;
+    let vertical = matches!(edge, Side::Left | Side::Right);
+    let (outer, inner) = match edge {
+        Side::Left => ((r.x - orb.width, Side::Right, 2), (r.x, Side::Left, 0)),
+        Side::Right => (
+            (r.right(), Side::Left, 3),
+            (r.right() - orb.width, Side::Right, 1),
+        ),
+        Side::Top => ((r.y - orb.height, Side::Bottom, 2), (r.y, Side::Top, 0)),
+        Side::Bottom => (
+            (r.bottom(), Side::Top, 3),
+            (r.bottom() - orb.height, Side::Bottom, 1),
+        ),
+    };
+    let fits = |value| {
+        if vertical {
+            value >= area.x && value + orb.width <= area.right()
+        } else {
+            value >= area.y && value + orb.height <= area.bottom()
+        }
+    };
+    // Keep a positive contact segment, including an anchor at an exact corner.
+    let (position, length, minimum, maximum, edge_min, edge_max) = if vertical {
+        (orb.y, orb.height, area.y, area.bottom(), r.y, r.bottom())
+    } else {
+        (orb.x, orb.width, area.x, area.right(), r.x, r.right())
+    };
+    let overlap = (edge_max - edge_min).min(length).min(1.0);
+    let lo = minimum.max(edge_min - length + overlap);
+    let hi = (maximum - length).min(edge_max - overlap);
+    let candidates = if exterior {
+        [outer, inner]
+    } else {
+        [inner, outer]
+    };
+    let (value, side, index) = candidates.into_iter().find(|c| fits(c.0))?;
+    if lo > hi {
+        return None;
+    }
+    let latch = Latch {
+        id: target.id.wrapping_mul(4).wrapping_add(index),
+        source: Source::Window,
+        side,
+        value,
+    };
+    if vertical {
+        orb.x = value;
+        orb.y = position.clamp(lo, hi);
+        Some((orb, Some(latch), None))
+    } else {
+        orb.y = value;
+        orb.x = position.clamp(lo, hi);
+        Some((orb, None, Some(latch)))
+    }
+}
+
+/// Bind the actual released orb to the selected target edge.
+pub fn from_release(orb: Rect, target: Target, x: f64, y: f64) -> Option<WindowAttachment> {
+    if !orb.valid() || !target.rect.valid() || !x.is_finite() || !y.is_finite() {
+        return None;
+    }
+    let edge = nearest_side(target.rect, x, y);
+    let fraction = match edge {
+        Side::Left | Side::Right => (orb.y + orb.height / 2.0 - target.rect.y) / target.rect.height,
+        Side::Top | Side::Bottom => (orb.x + orb.width / 2.0 - target.rect.x) / target.rect.width,
+    };
+    Some(
+        WindowAttachment {
+            target_id: target.id,
+            edge,
+            exterior: true,
+            fraction,
+        }
+        .with_placement(orb, target),
+    )
+}
+
+/// Follow one target without changing its bound edge or chosen side unless that
+/// placement cannot fit. A missing/off-screen edge returns None.
+pub fn follow_orb(
+    attachment: WindowAttachment,
+    target: Target,
+    orb_size: f64,
+    area: Rect,
+) -> Option<(Rect, Option<Latch>, Option<Latch>)> {
+    if target.id != attachment.target_id
+        || !target.rect.valid()
+        || !area.valid()
+        || !attachment.fraction.is_finite()
+        || !orb_size.is_finite()
+        || orb_size <= 0.0
+    {
+        return None;
+    }
+    let mut orb = Rect {
+        x: target.rect.x,
+        y: target.rect.y,
+        width: orb_size.min(area.width),
+        height: orb_size.min(area.height),
+    };
+    match attachment.edge {
+        Side::Left | Side::Right => {
+            orb.y = target.rect.y + attachment.fraction * target.rect.height - orb.height / 2.0;
+        }
+        Side::Top | Side::Bottom => {
+            orb.x = target.rect.x + attachment.fraction * target.rect.width - orb.width / 2.0;
+        }
+    }
+    dock_to_edge(orb, area, target, attachment.edge, attachment.exterior)
+}
+
+/// Enforce one nearest edge after a moved gesture. The caller has already
+/// selected a visible, eligible target using the pointer or the orb footprint.
 pub fn release_dock(
     raw: Rect,
     area: Rect,
@@ -195,58 +344,17 @@ pub fn release_dock(
         return None;
     }
     let mut orb = clamp(raw, area);
-    if let Some(target) = target.filter(|t| t.rect.contains(cursor_x, cursor_y)) {
-        let r = target.rect;
-        let edge = nearest_side(r, cursor_x, cursor_y);
-        let vertical = matches!(edge, Side::Left | Side::Right);
-        let (outer, inner) = match edge {
-            Side::Left => ((r.x - orb.width, Side::Right, 2), (r.x, Side::Left, 0)),
-            Side::Right => (
-                (r.right(), Side::Left, 3),
-                (r.right() - orb.width, Side::Right, 1),
-            ),
-            Side::Top => ((r.y - orb.height, Side::Bottom, 2), (r.y, Side::Top, 0)),
-            Side::Bottom => (
-                (r.bottom(), Side::Top, 3),
-                (r.bottom() - orb.height, Side::Bottom, 1),
-            ),
-        };
-        let fits = |value| {
-            if vertical {
-                value >= area.x && value + orb.width <= area.right()
-            } else {
-                value >= area.y && value + orb.height <= area.bottom()
-            }
-        };
-        // Keep a positive contact segment, including an anchor at an exact corner.
-        let (position, length, minimum, maximum, edge_min, edge_max) = if vertical {
-            (orb.y, orb.height, area.y, area.bottom(), r.y, r.bottom())
-        } else {
-            (orb.x, orb.width, area.x, area.right(), r.x, r.right())
-        };
-        let overlap = (edge_max - edge_min).min(length).min(1.0);
-        let lo = minimum.max(edge_min - length + overlap);
-        let hi = (maximum - length).min(edge_max - overlap);
-        if let Some((value, side, index)) = [outer, inner].into_iter().find(|c| fits(c.0)) {
-            if lo <= hi {
-                let latch = Latch {
-                    id: target.id.wrapping_mul(4).wrapping_add(index),
-                    source: Source::Window,
-                    side,
-                    value,
-                };
-                if vertical {
-                    orb.x = value;
-                    orb.y = position.clamp(lo, hi);
-                    return Some((orb, Some(latch), None));
-                }
-                orb.y = value;
-                orb.x = position.clamp(lo, hi);
-                return Some((orb, None, Some(latch)));
-            }
+    if let Some(target) = target.filter(|target| target.rect.valid()) {
+        if let Some(docked) = dock_to_edge(
+            orb,
+            area,
+            target,
+            nearest_side(target.rect, cursor_x, cursor_y),
+            true,
+        ) {
+            return Some(docked);
         }
-        // An off-screen window edge may have no legal outer or inner placement.
-        // In that case the screen edge is the real attachment, never a fake latch.
+        // An off-screen edge with no legal contact falls back to the screen.
     }
     let side = nearest_side(area, cursor_x, cursor_y);
     let (id, value) = match side {
@@ -513,19 +621,267 @@ mod tests {
             release_dock(r(-41., 354., 92., 92.), area, Some(target), 5., 400.).unwrap();
         assert_eq!(docked.x, 0.);
         assert_eq!(x.unwrap().source, Source::Screen);
-        // A provided target that does not contain the release point is not eligible.
-        let (_, x, _) = release_dock(
-            r(900., 700., 92., 92.),
-            area,
-            Some(Target {
-                id: 2,
-                rect: r(100., 100., 200., 200.),
-            }),
-            950.,
-            746.,
-        )
-        .unwrap();
-        assert_eq!(x.unwrap().source, Source::Screen);
+    }
+
+    #[test]
+    fn selected_window_accepts_all_four_boundaries_and_touching_orb_footprints() {
+        let area = r(0., 0., 1000., 800.);
+        let target = Target {
+            id: 9,
+            rect: r(200., 200., 400., 300.),
+        };
+        for offset in [0., 1., 46.] {
+            for (x, y, edge) in [
+                (200. - offset, 350., Side::Left),
+                (600. + offset, 350., Side::Right),
+                (400., 200. - offset, Side::Top),
+                (400., 500. + offset, Side::Bottom),
+            ] {
+                assert_eq!(target.rect.contains_closed(x, y), offset == 0.);
+                let (orb, lx, ly) =
+                    release_dock(r(x - 46., y - 46., 92., 92.), area, Some(target), x, y).unwrap();
+                assert_eq!(lx.or(ly).unwrap().source, Source::Window);
+                let attachment = from_release(orb, target, x, y).unwrap();
+                assert_eq!(attachment.edge, edge);
+                assert_eq!(
+                    follow_orb(attachment, target, 92., area).unwrap(),
+                    (orb, lx, ly)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn following_translates_all_edges_and_preserves_fraction_on_resize() {
+        let area = r(0., 0., 1400., 1000.);
+        let target = Target {
+            id: 9,
+            rect: r(250., 250., 400., 300.),
+        };
+        for (x, y, edge) in [
+            (250., 325., Side::Left),
+            (650., 325., Side::Right),
+            (350., 250., Side::Top),
+            (350., 550., Side::Bottom),
+        ] {
+            let (orb, _, _) =
+                release_dock(r(x - 46., y - 46., 92., 92.), area, Some(target), x, y).unwrap();
+            let attachment = from_release(orb, target, x, y).unwrap();
+            assert_eq!(attachment.fraction, 0.25);
+            let moved = Target {
+                rect: r(350., 300., 400., 300.),
+                ..target
+            };
+            let (followed, lx, ly) = follow_orb(attachment, moved, 92., area).unwrap();
+            assert_eq!((followed.x - orb.x, followed.y - orb.y), (100., 50.));
+            assert_eq!(attachments(followed, area, &[moved]), (lx, ly));
+            let resized = Target {
+                rect: r(350., 300., 600., 400.),
+                ..target
+            };
+            let (followed, _, _) = follow_orb(attachment, resized, 92., area).unwrap();
+            let center = if matches!(edge, Side::Left | Side::Right) {
+                followed.y + 46.
+            } else {
+                followed.x + 46.
+            };
+            let expected = if matches!(edge, Side::Left | Side::Right) {
+                400.
+            } else {
+                500.
+            };
+            assert_eq!(center, expected);
+            assert_eq!(clamp(followed, area), followed);
+        }
+    }
+
+    #[test]
+    fn follow_keeps_target_edge_when_switching_inside_or_losing_the_edge() {
+        let area = r(0., 0., 1000., 800.);
+        let target = Target {
+            id: 7,
+            rect: r(200., 200., 400., 300.),
+        };
+        for (edge, near, hidden) in [
+            (
+                Side::Left,
+                r(20., 200., 400., 300.),
+                r(-20., 200., 400., 300.),
+            ),
+            (
+                Side::Right,
+                r(580., 200., 400., 300.),
+                r(620., 200., 400., 300.),
+            ),
+            (
+                Side::Top,
+                r(200., 20., 400., 300.),
+                r(200., -20., 400., 300.),
+            ),
+            (
+                Side::Bottom,
+                r(200., 480., 400., 300.),
+                r(200., 520., 400., 300.),
+            ),
+        ] {
+            let attachment = WindowAttachment {
+                target_id: 7,
+                edge,
+                exterior: true,
+                fraction: 0.5,
+            };
+            let current = Target {
+                rect: near,
+                ..target
+            };
+            let (inside, lx, ly) = follow_orb(attachment, current, 92., area).unwrap();
+            assert_eq!(lx.or(ly).unwrap().side, edge);
+            assert_eq!(attachments(inside, area, &[current]), (lx, ly));
+            assert_eq!(clamp(inside, area), inside);
+            assert!(follow_orb(
+                attachment,
+                Target {
+                    rect: hidden,
+                    ..target
+                },
+                92.,
+                area
+            )
+            .is_none());
+            assert!(follow_orb(attachment, Target { id: 8, ..target }, 92., area).is_none());
+        }
+    }
+
+    #[test]
+    fn an_inside_attachment_stays_inside_when_the_window_moves_away_from_screen() {
+        let area = r(0., 0., 1000., 800.);
+        let moved = Target {
+            id: 7,
+            rect: r(300., 250., 400., 300.),
+        };
+        for (near, x, y, edge) in [
+            (r(20., 250., 400., 300.), 20., 400., Side::Left),
+            (r(580., 250., 400., 300.), 980., 400., Side::Right),
+            (r(300., 20., 400., 300.), 500., 20., Side::Top),
+            (r(300., 480., 400., 300.), 500., 780., Side::Bottom),
+        ] {
+            let target = Target { id: 7, rect: near };
+            let (orb, _, _) =
+                release_dock(r(x - 46., y - 46., 92., 92.), area, Some(target), x, y).unwrap();
+            let attachment = from_release(orb, target, x, y).unwrap();
+            assert_eq!(attachment.edge, edge);
+            assert!(!attachment.exterior);
+            let (followed, lx, ly) = follow_orb(attachment, moved, 92., area).unwrap();
+            assert_eq!(lx.or(ly).unwrap().side, edge);
+            assert_eq!(
+                (followed.x - orb.x, followed.y - orb.y),
+                (moved.rect.x - near.x, moved.rect.y - near.y)
+            );
+            assert!(!attachment.with_placement(followed, moved).exterior);
+            assert_eq!(attachments(followed, area, &[moved]), (lx, ly));
+        }
+    }
+
+    #[test]
+    fn an_outside_attachment_switches_only_when_needed_and_keeps_the_new_side() {
+        let area = r(0., 0., 1000., 800.);
+        let original = Target {
+            id: 7,
+            rect: r(300., 250., 400., 300.),
+        };
+        for (x, y, edge, threshold, closer) in [
+            (
+                300.,
+                400.,
+                Side::Left,
+                r(92., 250., 400., 300.),
+                r(91., 250., 400., 300.),
+            ),
+            (
+                700.,
+                400.,
+                Side::Right,
+                r(508., 250., 400., 300.),
+                r(509., 250., 400., 300.),
+            ),
+            (
+                500.,
+                250.,
+                Side::Top,
+                r(300., 92., 400., 300.),
+                r(300., 91., 400., 300.),
+            ),
+            (
+                500.,
+                550.,
+                Side::Bottom,
+                r(300., 408., 400., 300.),
+                r(300., 409., 400., 300.),
+            ),
+        ] {
+            let (orb, _, _) =
+                release_dock(r(x - 46., y - 46., 92., 92.), area, Some(original), x, y).unwrap();
+            let attachment = from_release(orb, original, x, y).unwrap();
+            assert_eq!(attachment.edge, edge);
+            assert!(attachment.exterior);
+            let last_outside = Target {
+                rect: threshold,
+                ..original
+            };
+            let (orb, _, _) = follow_orb(attachment, last_outside, 92., area).unwrap();
+            assert!(attachment.with_placement(orb, last_outside).exterior);
+            let near = Target {
+                rect: closer,
+                ..original
+            };
+            let (inside, lx, ly) = follow_orb(attachment, near, 92., area).unwrap();
+            assert_eq!(lx.or(ly).unwrap().side, edge);
+            let updated = attachment.with_placement(inside, near);
+            assert!(!updated.exterior);
+            assert_eq!(
+                (updated.edge, updated.fraction),
+                (attachment.edge, attachment.fraction)
+            );
+            let (returned, lx, ly) = follow_orb(updated, original, 92., area).unwrap();
+            assert_eq!(lx.or(ly).unwrap().side, edge);
+            assert!(!updated.with_placement(returned, original).exterior);
+            assert_eq!(attachments(returned, area, &[original]), (lx, ly));
+            assert_eq!(
+                attachment.with_placement(inside, Target { id: 8, ..near }),
+                attachment
+            );
+        }
+    }
+
+    #[test]
+    fn following_preserves_corner_contact_and_handles_negative_scaled_displays() {
+        let area = r(-2560., -200., 2560., 1400.);
+        let target = Target {
+            id: 1,
+            rect: r(-2000., 200., 800., 600.),
+        };
+        for (x, y) in [
+            (-2000., 200.),
+            (-1200., 200.),
+            (-2000., 800.),
+            (-1200., 800.),
+        ] {
+            let (orb, lx, ly) =
+                release_dock(r(x - 184., y - 184., 184., 184.), area, Some(target), x, y).unwrap();
+            let attachment = from_release(orb, target, x, y).unwrap();
+            assert_eq!(
+                follow_orb(attachment, target, 184., area).unwrap(),
+                (orb, lx, ly)
+            );
+        }
+        let invalid = WindowAttachment {
+            target_id: 1,
+            edge: Side::Left,
+            exterior: true,
+            fraction: f64::NAN,
+        };
+        assert!(follow_orb(invalid, target, 184., area).is_none());
+        assert!(from_release(r(0., 0., 92., 92.), target, f64::NAN, 0.).is_none());
     }
 
     #[test]

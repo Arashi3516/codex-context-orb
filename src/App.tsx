@@ -10,7 +10,7 @@ import type { ContextSnapshot } from './lib/context'
 import { ITEM_LABELS, RESULT_LABELS, RULE_LABELS, isEvidenceReport, type EvidenceReport } from './lib/evidence'
 import { demoReport, demoSessions, DEMO_PRIMARY_ID, type DemoScenario } from './lib/demo'
 import { beginNativeMagneticDrag, endNativeMagneticDrag, getNativeMagnetState, isNative, readEvidenceHistory, readLocalSessions, setNativeMagnetPreferences, sizeOrbWindow } from './lib/native'
-import { DEFAULT_MAGNET, WINDOW_MODE_LABELS, dockPreview, parseMagnetPreferences, type MagnetPreferences, type MagnetState, type Rect, type WindowMagnetMode } from './lib/magnet'
+import { DEFAULT_MAGNET, WINDOW_MODE_LABELS, dockPreview, latestMagnetState, parseMagnetPreferences, type MagnetPreferences, type MagnetState, type Rect, type WindowMagnetMode } from './lib/magnet'
 import { presentCapacity, presentCompactions, presentRisk } from './lib/presentation'
 import ContextReadout from './ContextReadout'
 
@@ -55,7 +55,8 @@ export default function App() {
   const [dynamicColor, setDynamicColor] = useState(() => readPreference('orb:dynamic-color', 'true') !== 'false')
   const [showCompactions, setShowCompactions] = useState(() => readPreference('orb:show-compactions', 'false') === 'true')
   const [magnetPreferences, setMagnetPreferences] = useState(() => parseMagnetPreferences(readPreference('orb:magnet', JSON.stringify(DEFAULT_MAGNET))))
-  const [magnetState, setMagnetState] = useState<MagnetState | null>(null)
+  const [magnetState, updateMagnetState] = useState<MagnetState | null>(null)
+  function setMagnetState(incoming: MagnetState) { updateMagnetState(current => latestMagnetState(current, incoming)) }
   const [magnetSaving, setMagnetSaving] = useState(false)
   const [magnetInitialized, setMagnetInitialized] = useState(!isNative)
   const magnetWriteBusy = useRef(isNative)
@@ -70,7 +71,7 @@ export default function App() {
   const stageRef = useRef<HTMLElement>(null)
   const helpRef = useRef<HTMLElement>(null)
   const helpTriggerRef = useRef<HTMLButtonElement>(null)
-  const pointer = useRef<{ x: number; y: number; moved: boolean; rect: Rect; nativeStart?: Promise<MagnetState> } | null>(null)
+  const pointer = useRef<{ x: number; y: number; moved: boolean; rect: Rect; stage: Rect; nativeStart?: Promise<MagnetState> } | null>(null)
   const resizeQueue = useRef(Promise.resolve())
   const snapshot = resolvePinned(sessions, pinnedId)
   const health = evaluateContext(snapshot, now)
@@ -261,7 +262,8 @@ export default function App() {
     const stage = stageRef.current?.getBoundingClientRect(), ball = orbRef.current?.getBoundingClientRect()
     if (!stage || !ball) return
     pointer.current = { x: isNative ? event.screenX : event.clientX, y: isNative ? event.screenY : event.clientY, moved: false,
-      rect: { x: ball.x - stage.x, y: ball.y - stage.y, width: ball.width, height: ball.height } }
+      rect: { x: ball.x - stage.x, y: ball.y - stage.y, width: ball.width, height: ball.height },
+      stage: { x: stage.x, y: stage.y, width: stage.width, height: stage.height } }
     event.currentTarget.setPointerCapture(event.pointerId)
     if (isNative) {
       nativeGestureBusy.current = true
@@ -276,10 +278,9 @@ export default function App() {
     const dy = (isNative ? event.screenY : event.clientY) - start.y
     if (!start.moved && Math.hypot(dx, dy) < 4) return
     start.moved = true
-    if (isNative) return
     setDragging(true)
-    const stage = stageRef.current?.getBoundingClientRect()
-    if (!stage) return
+    if (isNative) return
+    const stage = start.stage
     const rect = { ...start.rect, x: Math.max(6, Math.min(stage.width - start.rect.width - 6, start.rect.x + dx)),
       y: Math.max(6, Math.min(stage.height - start.rect.height - 6, start.rect.y + dy)) }
     if (!previewLayout) setPreviewLayout(previewPanelLayout(rect, stage))
@@ -320,6 +321,7 @@ export default function App() {
       finally { nativeGestureBusy.current = false }
     }
     if (wasMoved) {
+      if (isNative) setExpanded(false)
       if (!isNative) finishPreviewDrag(start, event.clientX, event.clientY)
       return
     }
@@ -332,6 +334,17 @@ export default function App() {
     if (isNative && start) void Promise.resolve(start.nativeStart).then(() => endNativeMagneticDrag()).then(setMagnetState).catch(() => {}).finally(() => { nativeGestureBusy.current = false })
     else if (start?.moved) finishPreviewDrag(start, start.x + offset.x - start.rect.x, start.y + offset.y - start.rect.y)
   }
+  async function keyboardToggle() {
+    if (nativeGestureBusy.current) return
+    if (isNative) {
+      nativeGestureBusy.current = true
+      try { setMagnetState(await getNativeMagnetState()) }
+      catch { setToast('窗口状态暂不可用，请重试。'); return }
+      finally { nativeGestureBusy.current = false }
+    }
+    setExpanded(open => !open)
+    setView('overview')
+  }
 
   const orb = <div ref={dockRef} className={`orb-dock level-${health.level} risk-${dynamicColor ? risk.tone : 'neutral'} ${previewLayout ? 'preview-placed' : ''} ${dockLeft ? 'dock-left' : ''} ${dockTop ? 'dock-top' : ''} ${dragging || magnetState?.dragging ? 'is-dragging' : ''} ${snapped ? 'is-snapped' : ''}`} style={{ '--orb-x': `${offset.x}px`, '--orb-y': `${offset.y}px`, '--preview-panel-width': `${previewLayout?.width ?? 340}px`, '--preview-panel-height': `${previewLayout?.height ?? 600}px` } as CSSProperties}>
     {expanded && <section
@@ -339,7 +352,7 @@ export default function App() {
       role="dialog" aria-label="会话状态" onKeyDown={event => { if (event.key === 'Escape') closePanel() }}
     >
       <header className="panel-top">
-        <div className="panel-brand"><OrbMark /><span>Context Orb</span><span className="version-pill">v0.4 预览</span></div>
+        <div className="panel-brand"><OrbMark /><span>Context Orb</span><span className="version-pill">v0.4.2 预览</span></div>
         <button className="icon-button" aria-label="收起面板" onClick={closePanel}><X size={17} /></button>
       </header>
       {view !== 'overview' && <button className="back-button" onClick={() => { setView('overview'); setHistoricalReport(null) }}><ArrowLeft size={14} />返回概览</button>}
@@ -455,7 +468,7 @@ export default function App() {
         <h2>按你的习惯停靠</h2><p className="subview-intro">拖动后松手，自动停靠最近的边框。</p>
         <fieldset className="magnet-settings"><legend><Magnet size={14} />窗口吸附</legend>
           <div className="window-modes">{(['codex', 'off', 'all'] as WindowMagnetMode[]).map(mode => <label key={mode} className={magnetPreferences.windowMode === mode ? 'selected' : ''}><input type="radio" name="window-magnet" aria-label={mode === 'codex' ? '仅限 Codex 窗口' : WINDOW_MODE_LABELS[mode]} disabled={magnetControlsDisabled} checked={magnetPreferences.windowMode === mode} onChange={() => void changeMagnet({ windowMode: mode })} /><span>{WINDOW_MODE_LABELS[mode]}</span></label>)}</div>
-          <p>{magnetPreferences.windowMode === 'codex' ? '在 Codex 窗口内松手，停靠它最近的边；其余位置停靠屏幕边缘。' : magnetPreferences.windowMode === 'all' ? '在可见窗口内松手，停靠它最近的边；其余位置停靠屏幕边缘。' : '每次松手，都停靠当前屏幕最近的边缘。'}</p>
+          <p>{magnetPreferences.windowMode === 'codex' ? '在 Codex 窗口内或球贴到边框时松手，平滑停靠并随窗口移动。' : magnetPreferences.windowMode === 'all' ? '在可见窗口内或球贴到边框时松手，平滑停靠并随窗口移动。' : '松手后，平滑停靠当前屏幕最近的边缘。'}{magnetPreferences.windowMode !== 'off' && '其余位置停靠屏幕边缘。'}</p>
           {isNative && magnetState?.capabilities.reason && <p className="magnet-caveat">窗口信息暂不可用，请确认桌面会话与显示器可用后重试。</p>}
           {isNative && magnetState?.capabilities.codexGui === 'unavailable' && magnetPreferences.windowMode === 'codex' && <p className="magnet-caveat">此平台暂不能可靠识别 Codex，可切换为「所有窗口」。</p>}
           {!isNative && <small>此处演示网页内拖拽；桌面版使用真实窗口边界。</small>}
@@ -476,7 +489,7 @@ export default function App() {
         aria-label={expanded ? '收起 Context Orb' : '展开 Context Orb'} aria-expanded={expanded}
         aria-controls="orb-panel" aria-describedby="orb-state-description" title={`${risk.value} · ${capacity.percent === null ? '用量未接入' : `容量 ${capacity.percent}%（演示）`} · 点击展开，拖动定位`}
         onPointerDown={pointerDown} onPointerMove={pointerMove} onPointerUp={event => void pointerUp(event)} onPointerCancel={pointerCancel} onLostPointerCapture={pointerCancel}
-        onClick={event => { if (event.detail === 0) { setExpanded(open => !open); setView('overview') } }}
+        onClick={event => { if (event.detail === 0) void keyboardToggle() }}
       >
         <svg className={`orb-ring ${capacity.ratio === null ? 'capacity-unknown' : 'capacity-known'}`} viewBox="0 0 80 80" aria-hidden="true">
           <circle className="orb-ring-base" cx="40" cy="40" r="36" />

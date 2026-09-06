@@ -31,7 +31,8 @@ fn main() {
         .invoke_handler(tauri::generate_handler![telemetry::read_hook_events, assessments::read_semantic_assessments, evidence::read_evidence_reports, evidence::read_evidence_history, magnet::get_magnet_state, magnet::set_magnet_preferences, magnet::begin_magnetic_drag, magnet::end_magnetic_drag, magnet::resize_orb_window])
         .setup(|app| {
             if let Some(window) = app.get_webview_window("orb") {
-                magnet::start(window);
+                magnet::start(window.clone());
+                window.show()?;
             }
             Ok(())
         })

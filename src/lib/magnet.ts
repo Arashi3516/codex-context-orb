@@ -5,6 +5,7 @@ export interface MagnetPreferences {
 export interface Rect { x: number; y: number; width: number; height: number }
 type Capability = 'available' | 'unavailable' | 'unsupported'
 export interface MagnetState {
+  revision: number
   preferences: MagnetPreferences
   capabilities: { drag: Capability; screenEdges: Capability; windowEdges: Capability; coordinateSpace: 'logical_points' | 'physical_pixels' | 'unsupported'; codexGui: 'bundle_id' | 'unavailable'; reason: string | null }
   dragging: boolean
@@ -19,6 +20,9 @@ export interface MagnetState {
   geometry: Rect | null
   monitor: { workArea: Rect; unitsPerLogicalPixel: number } | null
   lastError: string | null
+}
+export function latestMagnetState(current: MagnetState | null, incoming: MagnetState): MagnetState {
+  return current && (current.revision ?? 0) > (incoming.revision ?? 0) ? current : incoming
 }
 export const DEFAULT_MAGNET: MagnetPreferences = { windowMode: 'codex' }
 export const WINDOW_MODE_LABELS: Record<WindowMagnetMode, string> = { codex: '仅限 Codex', off: '关闭', all: '所有窗口' }
@@ -36,7 +40,9 @@ export function parseMagnetPreferences(raw: string): MagnetPreferences {
 /** Browser demo of mandatory release docking. Desktop geometry remains native. */
 export function dockPreview(rect: Rect, area: Rect, windows: Rect[], prefs: MagnetPreferences, cursor: { x: number; y: number }) {
   const contains = (r: Rect) => cursor.x >= r.x && cursor.x <= r.x + r.width && cursor.y >= r.y && cursor.y <= r.y + r.height
-  const target = prefs.windowMode === 'off' ? undefined : windows.find(contains)
+  const overlaps = (r: Rect) => rect.x <= r.x + r.width && rect.x + rect.width >= r.x
+    && rect.y <= r.y + r.height && rect.y + rect.height >= r.y
+  const target = prefs.windowMode === 'off' ? undefined : windows.find(contains) ?? windows.find(overlaps)
   const edge = (r: Rect) => ([
     { side: 'left', distance: Math.abs(cursor.x - r.x) }, { side: 'right', distance: Math.abs(cursor.x - r.x - r.width) },
     { side: 'top', distance: Math.abs(cursor.y - r.y) }, { side: 'bottom', distance: Math.abs(cursor.y - r.y - r.height) },

@@ -145,6 +145,8 @@ test('release always docks the orb and opening the panel preserves its position'
   await page.mouse.down()
   await page.mouse.move(stage.x + stage.width / 2, stage.y + stage.height * .85, { steps: 8 })
   await page.mouse.up()
+  await expect(page.locator('.orb-dock')).toHaveClass(/is-snapped/)
+  await page.locator('.orb-dock').evaluate(async element => { await Promise.all(element.getAnimations().map(animation => animation.finished)) })
   box = (await orb.boundingBox())!
   expect(Math.abs(box.y + box.height - (stage.y + stage.height - 6))).toBeLessThan(2)
   const docked = box
@@ -162,6 +164,8 @@ test('release always docks the orb and opening the panel preserves its position'
   await page.mouse.down()
   await page.mouse.move(target.x + target.width / 2, target.y + 20, { steps: 8 })
   await page.mouse.up()
+  await expect(page.locator('.orb-dock')).toHaveClass(/is-snapped/)
+  await page.locator('.orb-dock').evaluate(async element => { await Promise.all(element.getAnimations().map(animation => animation.finished)) })
   box = (await orb.boundingBox())!
   expect(Math.abs(box.y + box.height - target.y)).toBeLessThan(2)
   await expect(page.locator('#orb-state-description')).toContainText('已吸附窗口边缘')
@@ -196,7 +200,7 @@ test('risk color, capacity ring and optional count remain distinct and settings 
   await expect(page.getByRole('radio', { name: '仅限 Codex 窗口' })).toBeChecked()
   await expect(page.getByRole('button', { name: /绑定 CLI/ })).toHaveCount(0)
   await page.getByRole('radio', { name: '关闭', exact: true }).check()
-  await expect(page.getByTestId('orb-panel')).toContainText('每次松手，都停靠当前屏幕最近的边缘')
+  await expect(page.getByTestId('orb-panel')).toContainText('松手后，平滑停靠当前屏幕最近的边缘')
   await page.getByRole('switch', { name: '球体动态配色' }).click()
   await expect(page.locator('.orb-dock')).toHaveClass(/risk-neutral/)
   await page.getByRole('switch', { name: '显示压缩次数' }).click()

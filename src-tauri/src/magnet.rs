@@ -1,5 +1,7 @@
 use crate::{
-    magnet_geometry::{self as geometry, Latch, Rect, Screen, Side, Source, Target},
+    magnet_geometry::{
+        self as geometry, Latch, Rect, Screen, Side, Source, Target, WindowAttachment,
+    },
     magnet_platform::{self as platform, OtherWindow},
 };
 use serde::{Deserialize, Serialize};
@@ -44,6 +46,7 @@ pub struct Capabilities {
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MagnetState {
+    revision: u64,
     preferences: Preferences,
     capabilities: Capabilities,
     dragging: bool,
@@ -71,6 +74,32 @@ struct Drag {
     started: Instant,
     last_cursor: (f64, f64),
     release_frame: Option<Rect>,
+    resume_motion: Option<DockMotion>,
+}
+
+#[derive(Clone, Copy)]
+struct DockMotion {
+    from: Rect,
+    to: Rect,
+    screen: Screen,
+    x: Option<Latch>,
+    y: Option<Latch>,
+    started: Instant,
+    duration: Duration,
+}
+impl DockMotion {
+    fn frame(&self, elapsed: Duration) -> (Rect, bool) {
+        let t = (elapsed.as_secs_f64() / self.duration.as_secs_f64()).clamp(0.0, 1.0);
+        let eased = 1.0 - (1.0 - t).powi(3);
+        (
+            Rect {
+                x: self.from.x + (self.to.x - self.from.x) * eased,
+                y: self.from.y + (self.to.y - self.from.y) * eased,
+                ..self.to
+            },
+            t >= 1.0,
+        )
+    }
 }
 impl Drag {
     fn widget_at(&self, screen: Screen, cursor_x: f64, cursor_y: f64) -> Rect {
@@ -102,6 +131,11 @@ pub struct Engine {
     requested_height: f64,
     configured: bool,
     windows_observed_at: Option<Instant>,
+    attachment: Option<WindowAttachment>,
+    attachment_owner: Option<u32>,
+    motion: Option<DockMotion>,
+    reduced_motion: bool,
+    last_placed: Option<Rect>,
 }
 pub type Magnet = Mutex<Engine>;
 
@@ -110,6 +144,7 @@ impl Default for Engine {
         let supported = platform::COORDINATES != "unsupported";
         Self {
             view: MagnetState {
+                revision: 0,
                 preferences: Preferences::default(),
                 capabilities: Capabilities {
                     drag: if supported {
@@ -153,6 +188,11 @@ impl Default for Engine {
             requested_height: 92.0,
             configured: false,
             windows_observed_at: None,
+            attachment: None,
+            attachment_owner: None,
+            motion: None,
+            reduced_motion: false,
+            last_placed: None,
         }
     }
 }
@@ -188,17 +228,83 @@ impl Engine {
                 WindowMode::Codex => w.codex,
             }
     }
-    fn release_target(&self, cursor_x: f64, cursor_y: f64) -> Option<Target> {
-        // Hit-test before eligibility: a foreground non-Codex window can cover
-        // only part of a Codex window and must not be clicked through.
-        self.windows
-            .iter()
-            .find(|w| w.rect.contains(cursor_x, cursor_y))
-            .filter(|w| self.eligible(w))
-            .map(|w| Target {
-                id: w.id,
-                rect: w.rect,
-            })
+    fn release_target(&self, cursor_x: f64, cursor_y: f64, orb: Rect) -> Option<Target> {
+        let target = |w: &OtherWindow| Target {
+            id: w.id,
+            rect: w.rect,
+        };
+        for (index, w) in self.windows.iter().enumerate() {
+            // Evaluate a foreground window's pointer and footprint together;
+            // the pointer can be over a background window beside its border.
+            if w.rect.contains_closed(cursor_x, cursor_y) {
+                return self.eligible(w).then(|| target(w));
+            }
+            if !self.eligible(w) || !orb.valid() || !w.rect.valid() {
+                continue;
+            }
+            let front = &self.windows[..index];
+            let visible_segment = |vertical: bool, fixed: f64, lo: f64, hi: f64| {
+                let (minimum, maximum) = if vertical {
+                    (orb.x, orb.right())
+                } else {
+                    (orb.y, orb.bottom())
+                };
+                if fixed < minimum || fixed > maximum || lo > hi {
+                    return false;
+                }
+                if lo == hi {
+                    let point = if vertical { (fixed, lo) } else { (lo, fixed) };
+                    return !front
+                        .iter()
+                        .any(|w| w.rect.contains_closed(point.0, point.1));
+                }
+                // A popup can cover the nearest projection while leaving another
+                // part of the touched edge visible. Subtract all foreground spans.
+                let mut covered: Vec<(f64, f64)> = front
+                    .iter()
+                    .filter_map(|w| {
+                        let r = w.rect;
+                        if !r.valid() {
+                            return None;
+                        }
+                        let (near, far, start, end) = if vertical {
+                            (r.x, r.right(), r.y, r.bottom())
+                        } else {
+                            (r.y, r.bottom(), r.x, r.right())
+                        };
+                        (fixed >= near && fixed <= far && start <= hi && end >= lo)
+                            .then_some((start.max(lo), end.min(hi)))
+                    })
+                    .collect();
+                covered.sort_by(|a, b| a.0.total_cmp(&b.0));
+                let mut end = lo;
+                for (start, next) in covered {
+                    if start > end {
+                        return true;
+                    }
+                    end = end.max(next);
+                    if end >= hi {
+                        return false;
+                    }
+                }
+                end < hi
+            };
+            let r = w.rect;
+            let y = (r.y.max(orb.y), r.bottom().min(orb.bottom()));
+            let x = (r.x.max(orb.x), r.right().min(orb.right()));
+            // Authorize the same nearest edge that release_dock will use, never
+            // an unrelated visible edge around an occluded corner.
+            let visible = match geometry::nearest_side(r, cursor_x, cursor_y) {
+                Side::Left => visible_segment(true, r.x, y.0, y.1),
+                Side::Right => visible_segment(true, r.right(), y.0, y.1),
+                Side::Top => visible_segment(false, r.y, x.0, x.1),
+                Side::Bottom => visible_segment(false, r.bottom(), x.0, x.1),
+            };
+            if visible {
+                return Some(target(w));
+            }
+        }
+        None
     }
     fn orb(&self, widget: Rect, screen: Screen) -> Rect {
         geometry::orb_box(
@@ -220,11 +326,7 @@ impl Engine {
         screen: Screen,
         reorient: bool,
     ) -> Result<(), String> {
-        let anchor = if reorient {
-            None
-        } else {
-            Some((self.view.layout_anchor_left, self.view.layout_anchor_top))
-        };
+        let anchor = self.layout_anchor(reorient);
         let (widget, left, top) = geometry::place_widget(
             platform::positioned_rect(orb),
             screen.work_area,
@@ -236,6 +338,15 @@ impl Engine {
         self.view.layout_anchor_left = left;
         self.view.layout_anchor_top = top;
         Ok(())
+    }
+    fn layout_anchor(&self, reorient: bool) -> Option<(bool, bool)> {
+        // Only a compact 92px window can change DOM corners without a transient
+        // jump between the native frame commit and the asynchronous UI reply.
+        if reorient && self.requested_width == 92.0 && self.requested_height == 92.0 {
+            None
+        } else {
+            Some((self.view.layout_anchor_left, self.view.layout_anchor_top))
+        }
     }
     fn targets(&self) -> Vec<Target> {
         self.windows
@@ -305,7 +416,31 @@ impl Engine {
         }
         self.view.geometry = Some(rect);
         self.view.monitor = Some(monitor);
+        self.last_placed = Some(rect);
         Ok(())
+    }
+    fn displaced_screen_dock(&self, desktop: &platform::Desktop) -> Option<(Rect, Screen)> {
+        let expected = self.last_placed.filter(|frame| *frame != desktop.rect)?;
+        let screen = geometry::nearest_screen(
+            &desktop.screens,
+            expected.x + expected.width / 2.0,
+            expected.y + expected.height / 2.0,
+        )?;
+        Some((self.orb(expected, screen), screen))
+    }
+    fn resize_anchor(&self, desktop: &platform::Desktop) -> Result<(Rect, Screen), String> {
+        if self.drag.is_none() && self.attachment.is_none() && self.motion.is_none() {
+            if let Some(expected) = self.displaced_screen_dock(desktop) {
+                return Ok(expected);
+            }
+        }
+        let screen = geometry::nearest_screen(
+            &desktop.screens,
+            desktop.rect.x + desktop.rect.width / 2.0,
+            desktop.rect.y + desktop.rect.height / 2.0,
+        )
+        .ok_or("No usable display")?;
+        Ok((self.orb(desktop.rect, screen), screen))
     }
     fn sample_drag(
         &mut self,
@@ -348,6 +483,158 @@ impl Engine {
         self.view.last_drag_moved = reported.unwrap_or(sampled_movement);
         (sampled_movement && !self.view.last_drag_moved).then_some(drag.start_frame)
     }
+    fn settle(
+        &mut self,
+        window: &WebviewWindow,
+        from: Rect,
+        to: Rect,
+        screen: Screen,
+        x: Option<Latch>,
+        y: Option<Latch>,
+    ) -> Result<(), String> {
+        let distance = (to.x - from.x).hypot(to.y - from.y) / screen.units_per_logical_pixel;
+        self.x = None;
+        self.y = None;
+        self.attachments();
+        if self.reduced_motion || distance < 1.0 {
+            self.motion = None;
+            self.place_orb(window, to, screen, true)?;
+            self.x = x;
+            self.y = y;
+            self.attachments();
+        } else {
+            // Short cubic deceleration, without bounce or an unbounded spring.
+            self.motion = Some(DockMotion {
+                from,
+                to,
+                screen,
+                x,
+                y,
+                started: Instant::now(),
+                duration: Duration::from_secs_f64((0.12 + distance * 0.0002).min(0.22)),
+            });
+        }
+        self.wake();
+        Ok(())
+    }
+    fn screen_fallback(
+        &mut self,
+        window: &WebviewWindow,
+        orb: Rect,
+        screen: Screen,
+    ) -> Result<(), String> {
+        self.attachment = None;
+        self.attachment_owner = None;
+        let (to, x, y) = geometry::release_dock(
+            orb,
+            screen.work_area,
+            None,
+            orb.x + orb.width / 2.0,
+            orb.y + orb.height / 2.0,
+        )
+        .ok_or("Display recovery geometry is unavailable")?;
+        self.settle(window, orb, to, screen, x, y)
+    }
+    fn follow(
+        &mut self,
+        window: &WebviewWindow,
+        desktop: &platform::Desktop,
+    ) -> Result<(), String> {
+        let Some(attachment) = self.attachment else {
+            return Ok(());
+        };
+        let target = match platform::window(attachment.target_id) {
+            Ok(target) => {
+                target.filter(|w| self.eligible(w) && self.attachment_owner == Some(w.owner_pid))
+            }
+            Err(error) => {
+                self.view.capabilities.window_edges = "unavailable";
+                self.view.capabilities.reason = Some(error);
+                None
+            }
+        };
+        if let Some(w) = target {
+            let point = match attachment.edge {
+                Side::Left => (w.rect.x, w.rect.y + attachment.fraction * w.rect.height),
+                Side::Right => (
+                    w.rect.right(),
+                    w.rect.y + attachment.fraction * w.rect.height,
+                ),
+                Side::Top => (w.rect.x + attachment.fraction * w.rect.width, w.rect.y),
+                Side::Bottom => (
+                    w.rect.x + attachment.fraction * w.rect.width,
+                    w.rect.bottom(),
+                ),
+            };
+            let screen = geometry::nearest_screen(&desktop.screens, point.0, point.1)
+                .ok_or("No usable display")?;
+            if let Some((orb, x, y)) = geometry::follow_orb(
+                attachment,
+                Target {
+                    id: w.id,
+                    rect: w.rect,
+                },
+                platform::coordinate(92.0 * screen.units_per_logical_pixel),
+                screen.work_area,
+            ) {
+                self.attachment = Some(attachment.with_placement(
+                    orb,
+                    Target {
+                        id: w.id,
+                        rect: w.rect,
+                    },
+                ));
+                if let Some(cached) = self.windows.iter_mut().find(|old| old.id == w.id) {
+                    *cached = w;
+                }
+                if let Some(motion) = self.motion.as_mut() {
+                    motion.to = orb;
+                    motion.screen = screen;
+                    motion.x = x;
+                    motion.y = y;
+                } else {
+                    self.place_orb(window, orb, screen, true)?;
+                    self.x = x;
+                    self.y = y;
+                    self.attachments();
+                }
+                return Ok(());
+            }
+        }
+        self.windows.retain(|w| w.id != attachment.target_id);
+        let screen = self.view.monitor.ok_or("No usable display")?;
+        self.screen_fallback(window, self.orb(desktop.rect, screen), screen)
+    }
+    fn animate(&mut self, window: &WebviewWindow) -> Result<(), String> {
+        let Some(motion) = self.motion else {
+            return Ok(());
+        };
+        let (frame, done) = motion.frame(motion.started.elapsed());
+        self.place_orb(window, frame, motion.screen, done)?;
+        if done {
+            self.motion = None;
+            self.x = motion.x;
+            self.y = motion.y;
+            self.attachments();
+        }
+        Ok(())
+    }
+    fn tick_interval(&self) -> Duration {
+        Duration::from_millis(
+            if self.motion.is_some()
+                || self
+                    .drag
+                    .as_ref()
+                    .is_some_and(|d| d.release_frame.is_none())
+            {
+                16
+            } else if self.attachment.is_some() {
+                33
+            } else {
+                500
+            },
+        )
+    }
     fn tick(&mut self, window: &WebviewWindow) -> Result<(), String> {
         let desktop = self.desktop(window)?;
         if self.drag.is_some() {
@@ -369,6 +656,33 @@ impl Engine {
             self.view.dragging =
                 self.drag.as_ref().unwrap().release_frame.is_none() && self.view.last_drag_moved;
         } else {
+            if self.attachment.is_some() {
+                self.follow(window, &desktop)?;
+                self.animate(window)?;
+                return Ok(());
+            }
+            if self.motion.is_some() {
+                self.animate(window)?;
+                return Ok(());
+            }
+            // External OS placement is not a new user drag. Keep the last dock
+            // after a window manager recenters us; display removal still clamps
+            // it to an available work area. Explicit drags take the branch above.
+            if let Some((expected, screen)) = self.displaced_screen_dock(&desktop) {
+                let (orb, x, y) = geometry::release_dock(
+                    expected,
+                    screen.work_area,
+                    None,
+                    expected.x + expected.width / 2.0,
+                    expected.y + expected.height / 2.0,
+                )
+                .ok_or("Display recovery geometry is unavailable")?;
+                self.place_orb(window, orb, screen, true)?;
+                self.x = x;
+                self.y = y;
+                self.attachments();
+                return Ok(());
+            }
             // Recover after display removal/work-area changes without reading the mouse.
             if self.window_refresh_due() {
                 self.refresh_windows();
@@ -398,6 +712,10 @@ impl Engine {
     }
     fn fail(&mut self, error: String) {
         self.drag = None;
+        self.motion = None;
+        self.attachment = None;
+        self.attachment_owner = None;
+        self.last_placed = None;
         self.view.dragging = false;
         self.view.last_error = Some(error.clone());
         self.view.capabilities.reason = Some(error);
@@ -428,7 +746,10 @@ fn dispatch(
             let state = own.state::<Magnet>();
             let result = match state.lock() {
                 Ok(mut engine) => match action(&own, &mut engine) {
-                    Ok(()) => Ok(engine.view.clone()),
+                    Ok(()) => {
+                        engine.view.revision = engine.view.revision.saturating_add(1);
+                        Ok(engine.view.clone())
+                    }
                     Err(error) => {
                         engine.fail(error.clone());
                         Err(error)
@@ -450,6 +771,7 @@ pub fn start(window: WebviewWindow) {
         if let Ok(mut engine) = state.lock() {
             engine.wake = Some(wake);
             if let Err(error) = platform::configure(&window) {
+                eprintln!("Orb window configuration failed: {error}");
                 engine.fail(error);
                 return;
             }
@@ -497,7 +819,7 @@ pub fn start(window: WebviewWindow) {
         };
     }
     // Exactly one acknowledged callback at a time; no queued frame backlog and no
-    // lock is held while sleeping. Idle checks read only own geometry/display work areas.
+    // lock is held while sleeping. Follow reads only the one attached window.
     std::thread::spawn(move || loop {
         let (send, recv) = mpsc::sync_channel(1);
         let own = window.clone();
@@ -505,27 +827,23 @@ pub fn start(window: WebviewWindow) {
             .run_on_main_thread(move || {
                 let state = own.state::<Magnet>();
                 let Ok(mut engine) = state.lock() else {
-                    let _ = send.send(false);
+                    let _ = send.send(Duration::from_millis(500));
                     return;
                 };
                 if let Err(error) = engine.tick(&own) {
                     engine.fail(error);
                 }
-                let _ = send.send(
-                    engine
-                        .drag
-                        .as_ref()
-                        .is_some_and(|d| d.release_frame.is_none()),
-                );
+                engine.view.revision = engine.view.revision.saturating_add(1);
+                let _ = send.send(engine.tick_interval());
             })
             .is_err()
         {
             break;
         }
-        let Ok(active) = recv.recv() else {
+        let Ok(interval) = recv.recv() else {
             break;
         };
-        let _ = wake_receiver.recv_timeout(Duration::from_millis(if active { 16 } else { 500 }));
+        let _ = wake_receiver.recv_timeout(interval);
     });
 }
 
@@ -549,10 +867,14 @@ pub async fn set_magnet_preferences(
         }
         // Layout belongs to the orb, not the current window eligibility or latch.
         let desktop = engine.desktop(window)?;
-        engine.measure_attachments(
-            desktop.rect,
-            engine.view.monitor.ok_or("No usable display")?,
-        );
+        if engine.attachment.is_some() {
+            engine.follow(window, &desktop)?;
+        } else {
+            engine.measure_attachments(
+                desktop.rect,
+                engine.view.monitor.ok_or("No usable display")?,
+            );
+        }
         engine.view.last_error = None;
         engine.wake();
         Ok(())
@@ -594,6 +916,7 @@ pub async fn begin_magnetic_drag(
             started: Instant::now(),
             last_cursor: (x, y),
             release_frame: None,
+            resume_motion: engine.motion.take(),
         });
         // A short gesture may already be released. Freeze its unchanged frame and
         // let pointerup supply the captured final point; never sample post-up motion.
@@ -609,6 +932,7 @@ pub async fn end_magnetic_drag(
     anchor_x: Option<f64>,
     anchor_y: Option<f64>,
     moved: Option<bool>,
+    reduced_motion: Option<bool>,
 ) -> Result<MagnetState, String> {
     if anchor_x.is_some() != anchor_y.is_some()
         || ![anchor_x, anchor_y]
@@ -620,6 +944,7 @@ pub async fn end_magnetic_drag(
     }
     dispatch(window, move |window, engine| {
         engine.require_configured()?;
+        engine.reduced_motion = reduced_motion.unwrap_or(engine.reduced_motion);
         engine.view.dragging = false;
         if engine.drag.is_none() {
             return Ok(());
@@ -637,6 +962,17 @@ pub async fn end_magnetic_drag(
             engine.measure_attachments(frame, screen);
         }
         if !engine.view.last_drag_moved {
+            if let Some(motion) = drag.resume_motion {
+                let screen = engine.view.monitor.ok_or("No usable display")?;
+                engine.settle(
+                    window,
+                    engine.orb(engine.view.geometry.unwrap(), screen),
+                    motion.to,
+                    motion.screen,
+                    motion.x,
+                    motion.y,
+                )?;
+            }
             return Ok(());
         }
         let (cursor_x, cursor_y) = drag.release_point(desktop.rect, anchor_x.zip(anchor_y));
@@ -649,19 +985,32 @@ pub async fn end_magnetic_drag(
         if engine.view.preferences.window_mode != WindowMode::Off {
             engine.refresh_windows();
         }
-        let (orb, x, y) = geometry::release_dock(
-            orb,
-            screen.work_area,
-            engine.release_target(cursor_x, cursor_y),
-            cursor_x,
-            cursor_y,
-        )
-        .ok_or("Release geometry is unavailable")?;
-        engine.place_orb(window, orb, screen, true)?;
-        engine.x = x;
-        engine.y = y;
-        engine.attachments();
-        engine.wake();
+        let target = engine.release_target(cursor_x, cursor_y, orb);
+        let (docked, x, y) =
+            geometry::release_dock(orb, screen.work_area, target, cursor_x, cursor_y)
+                .ok_or("Release geometry is unavailable")?;
+        engine.attachment = target
+            .filter(|_| {
+                [x, y]
+                    .into_iter()
+                    .flatten()
+                    .any(|l| l.source == Source::Window)
+            })
+            .and_then(|target| geometry::from_release(docked, target, cursor_x, cursor_y));
+        engine.attachment_owner = engine.attachment.and_then(|a| {
+            engine
+                .windows
+                .iter()
+                .find(|w| w.id == a.target_id)
+                .map(|w| w.owner_pid)
+        });
+        // The first animation frame is the displayed release frame, avoiding a
+        // teleport when pointerup arrives between native pointer samples.
+        let from = engine.orb(
+            desktop.rect,
+            engine.view.monitor.ok_or("No usable display")?,
+        );
+        engine.settle(window, from, docked, screen, x, y)?;
         Ok(())
     })
 }
@@ -681,14 +1030,13 @@ pub async fn resize_orb_window(
     }
     dispatch(window, move |window, engine| {
         engine.require_configured()?;
+        let desktop = engine.desktop(window)?;
+        let (orb, screen) = engine.resize_anchor(&desktop)?;
         engine.drag = None;
         engine.view.dragging = false;
-        let desktop = engine.desktop(window)?;
-        let screen = engine.view.monitor.ok_or("No usable display")?;
-        let orb = engine.orb(desktop.rect, screen);
         engine.requested_width = width;
         engine.requested_height = height;
-        engine.place_orb(window, orb, screen, false)?;
+        engine.place_orb(window, orb, screen, true)?;
         if engine.view.preferences.window_mode != WindowMode::Off {
             engine.refresh_windows();
         }
@@ -700,11 +1048,389 @@ pub async fn resize_orb_window(
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn hit(e: &Engine, x: f64, y: f64) -> Option<Target> {
+        e.release_target(
+            x,
+            y,
+            Rect {
+                x: x - 46.,
+                y: y - 46.,
+                width: 92.,
+                height: 92.,
+            },
+        )
+    }
+    #[test]
+    fn a_background_pointer_hit_cannot_steal_the_foreground_codex_right_border() {
+        let mut e = Engine::default();
+        e.windows = vec![
+            OtherWindow {
+                id: 1,
+                owner_pid: 10,
+                codex: true,
+                dockable: true,
+                rect: Rect {
+                    x: 61.,
+                    y: 51.,
+                    width: 1311.,
+                    height: 790.,
+                },
+            },
+            OtherWindow {
+                id: 2,
+                owner_pid: 20,
+                codex: false,
+                dockable: true,
+                rect: Rect {
+                    x: 471.,
+                    y: 82.,
+                    width: 946.,
+                    height: 674.,
+                },
+            },
+        ];
+        // The pointer is over background Chrome, while the 92px orb touches
+        // the foreground Codex right edge at x=1372.
+        assert_eq!(hit(&e, 1386., 462.).unwrap().id, 1);
+        e.view.preferences.window_mode = WindowMode::All;
+        assert_eq!(hit(&e, 1386., 462.).unwrap().id, 1);
+        e.windows.swap(0, 1);
+        e.view.preferences.window_mode = WindowMode::Codex;
+        assert!(hit(&e, 1386., 462.).is_none());
+        e.view.preferences.window_mode = WindowMode::All;
+        assert_eq!(hit(&e, 1386., 462.).unwrap().id, 2);
+        e.view.preferences.window_mode = WindowMode::Off;
+        assert!(hit(&e, 1386., 462.).is_none());
+    }
+    #[test]
+    fn the_touched_edge_can_remain_visible_beside_a_small_foreground_popup() {
+        let mut e = Engine::default();
+        let popup = OtherWindow {
+            id: 3,
+            owner_pid: 30,
+            codex: false,
+            dockable: false,
+            rect: Rect {
+                x: 1360.,
+                y: 453.,
+                width: 24.,
+                height: 18.,
+            },
+        };
+        e.windows = vec![
+            popup,
+            OtherWindow {
+                id: 1,
+                owner_pid: 10,
+                codex: true,
+                dockable: true,
+                rect: Rect {
+                    x: 61.,
+                    y: 51.,
+                    width: 1311.,
+                    height: 790.,
+                },
+            },
+            OtherWindow {
+                id: 2,
+                owner_pid: 20,
+                codex: false,
+                dockable: true,
+                rect: Rect {
+                    x: 471.,
+                    y: 82.,
+                    width: 946.,
+                    height: 674.,
+                },
+            },
+        ];
+        // The projection (1372,462) is covered, but the touched edge spans
+        // y=416..508 and has visible portions above and below the popup.
+        assert_eq!(hit(&e, 1386., 462.).unwrap().id, 1);
+        // Two foreground spans together cover the entire touched edge.
+        e.windows[0].rect.y = 416.;
+        e.windows[0].rect.height = 50.;
+        e.windows.insert(
+            1,
+            OtherWindow {
+                id: 4,
+                rect: Rect {
+                    x: 1360.,
+                    y: 460.,
+                    width: 24.,
+                    height: 48.,
+                },
+                ..popup
+            },
+        );
+        assert!(hit(&e, 1386., 462.).is_none());
+        e.windows[0].rect.height = 34.;
+        e.windows[1].rect.y = 470.;
+        e.windows[1].rect.height = 38.;
+        assert_eq!(hit(&e, 1386., 462.).unwrap().id, 1);
+        // A foreground popup containing the pointer still blocks, even when
+        // another part of the Codex edge remains visible under the orb.
+        e.windows[0].rect = Rect {
+            x: 1380.,
+            y: 450.,
+            width: 20.,
+            height: 24.,
+        };
+        assert!(hit(&e, 1386., 462.).is_none());
+    }
+    #[test]
+    fn a_visible_corner_edge_does_not_authorize_the_occluded_nearest_edge() {
+        let mut e = Engine::default();
+        e.windows = vec![OtherWindow {
+            id: 1,
+            owner_pid: 10,
+            codex: true,
+            dockable: true,
+            rect: Rect {
+                x: 100.,
+                y: 100.,
+                width: 500.,
+                height: 400.,
+            },
+        }];
+        assert_eq!(hit(&e, 94., 94.).unwrap().id, 1);
+        assert_eq!(
+            geometry::nearest_side(e.windows[0].rect, 94., 94.),
+            Side::Left
+        );
+        e.windows.insert(
+            0,
+            OtherWindow {
+                id: 2,
+                owner_pid: 20,
+                codex: false,
+                dockable: false,
+                rect: Rect {
+                    x: 90.,
+                    y: 100.,
+                    width: 20.,
+                    height: 40.,
+                },
+            },
+        );
+        // The nearest left edge is fully covered; the visible top edge is not
+        // the edge that release_dock will choose at this equal-distance corner.
+        assert!(hit(&e, 94., 94.).is_none());
+    }
+    #[test]
+    fn all_four_visible_borders_accept_the_ball_footprint_but_never_reach_beyond_it() {
+        let mut e = Engine::default();
+        e.windows.push(OtherWindow {
+            id: 2,
+            owner_pid: 3,
+            codex: true,
+            dockable: true,
+            rect: Rect {
+                x: 100.,
+                y: 100.,
+                width: 500.,
+                height: 400.,
+            },
+        });
+        for (x, y) in [
+            (99., 300.),
+            (601., 300.),
+            (350., 99.),
+            (350., 501.),
+            (600., 300.),
+            (350., 500.),
+        ] {
+            assert_eq!(hit(&e, x, y).unwrap().id, 2, "border {x},{y}");
+        }
+        for (x, y) in [(53., 300.), (647., 300.), (350., 53.), (350., 547.)] {
+            assert!(hit(&e, x, y).is_none(), "outside footprint {x},{y}");
+        }
+        // The pointer is in empty space, but another application's popup covers
+        // the portion of the Codex edge touched by the ball.
+        e.windows.insert(
+            0,
+            OtherWindow {
+                id: 1,
+                owner_pid: 4,
+                codex: false,
+                dockable: false,
+                rect: Rect {
+                    x: 100.,
+                    y: 200.,
+                    width: 80.,
+                    height: 200.,
+                },
+            },
+        );
+        assert!(hit(&e, 99., 300.).is_none());
+        assert_eq!(hit(&e, 601., 300.).unwrap().id, 2);
+    }
+    #[test]
+    fn dock_motion_decelerates_without_overshoot_and_has_a_finite_end() {
+        let from = Rect {
+            x: -200.,
+            y: 50.,
+            width: 92.,
+            height: 92.,
+        };
+        let to = Rect {
+            x: 800.,
+            y: 750.,
+            ..from
+        };
+        let motion = DockMotion {
+            from,
+            to,
+            screen: Screen {
+                work_area: Rect {
+                    x: -500.,
+                    y: 0.,
+                    width: 1500.,
+                    height: 1000.,
+                },
+                units_per_logical_pixel: 1.,
+            },
+            x: None,
+            y: None,
+            started: Instant::now(),
+            duration: Duration::from_millis(200),
+        };
+        let mut previous = from;
+        let mut previous_step = f64::INFINITY;
+        for ms in (0..=200).step_by(20) {
+            let (frame, done) = motion.frame(Duration::from_millis(ms));
+            assert!(frame.x >= previous.x && frame.x <= to.x);
+            assert!(frame.y >= previous.y && frame.y <= to.y);
+            if ms > 0 {
+                let step = (frame.x - previous.x).hypot(frame.y - previous.y);
+                assert!(step <= previous_step + 0.000001);
+                previous_step = step;
+            }
+            assert_eq!(done, ms == 200);
+            previous = frame;
+        }
+        assert_eq!(motion.frame(Duration::from_secs(2)), (to, true));
+        let mut e = Engine::default();
+        assert_eq!(e.tick_interval(), Duration::from_millis(500));
+        e.attachment = Some(WindowAttachment {
+            target_id: 1,
+            edge: Side::Left,
+            fraction: 0.5,
+            exterior: true,
+        });
+        assert_eq!(e.tick_interval(), Duration::from_millis(33));
+        e.motion = Some(motion);
+        assert_eq!(e.tick_interval(), Duration::from_millis(16));
+    }
+    #[test]
+    fn animated_reorientation_waits_until_the_dom_corners_coincide() {
+        let mut e = Engine::default();
+        e.requested_width = 382.;
+        e.requested_height = 690.;
+        e.view.layout_anchor_left = false;
+        e.view.layout_anchor_top = false;
+        let orb = Rect {
+            x: 0.,
+            y: 200.,
+            width: 92.,
+            height: 92.,
+        };
+        let area = Rect {
+            x: 0.,
+            y: 0.,
+            width: 1000.,
+            height: 1000.,
+        };
+        assert_eq!(e.layout_anchor(true), Some((false, false)));
+        let (frame, left, top) =
+            geometry::place_widget(orb, area, 382., 690., e.layout_anchor(true));
+        assert_eq!((left, top), (false, false));
+        assert_eq!(geometry::orb_box(frame, 92., false, false), orb);
+        e.requested_width = 92.;
+        e.requested_height = 92.;
+        let (frame, left, top) = geometry::place_widget(orb, area, 92., 92., e.layout_anchor(true));
+        assert_eq!((left, top), (true, true));
+        // Before the new native state arrives, both old and new CSS anchors put
+        // the 80px button at the same 6px inset in the compact window.
+        assert_eq!(
+            geometry::orb_box(frame, 92., false, false),
+            geometry::orb_box(frame, 92., left, top)
+        );
+    }
+
+    #[test]
+    fn external_recentering_does_not_replace_a_valid_screen_dock() {
+        let mut e = Engine::default();
+        let parked = Rect {
+            x: 908.,
+            y: 400.,
+            width: 92.,
+            height: 92.,
+        };
+        let screen = Screen {
+            work_area: Rect {
+                x: 0.,
+                y: 20.,
+                width: 1000.,
+                height: 800.,
+            },
+            units_per_logical_pixel: 1.,
+        };
+        let mut desktop = platform::Desktop {
+            rect: parked,
+            screens: vec![screen],
+        };
+        e.last_placed = Some(parked);
+        assert!(e.displaced_screen_dock(&desktop).is_none());
+        desktop.rect.x = 454.;
+        desktop.rect.y = 374.;
+        let (expected, chosen) = e.displaced_screen_dock(&desktop).unwrap();
+        assert_eq!(expected, parked);
+        let (restored, x, _) = geometry::release_dock(
+            expected,
+            chosen.work_area,
+            None,
+            expected.x + 46.,
+            expected.y + 46.,
+        )
+        .unwrap();
+        assert_eq!(restored, parked);
+        assert_eq!(x.unwrap().source, Source::Screen);
+        // An expansion queued before the recovery tick must not trust the
+        // system's centered frame as the new resting position.
+        let (anchor, chosen) = e.resize_anchor(&desktop).unwrap();
+        assert_eq!(anchor, parked);
+        let (expanded, left, top) =
+            geometry::place_widget(anchor, chosen.work_area, 382., 690., Some((false, false)));
+        e.last_placed = Some(expanded);
+        desktop.rect = expanded;
+        assert!(e.displaced_screen_dock(&desktop).is_none());
+        assert_eq!(geometry::orb_box(desktop.rect, 92., left, top), parked);
+        desktop.rect.x = 454.;
+        // If that display disappears, recovery selects a current work area.
+        desktop.screens[0].work_area = Rect {
+            x: -800.,
+            y: 0.,
+            width: 800.,
+            height: 700.,
+        };
+        let (expected, chosen) = e.displaced_screen_dock(&desktop).unwrap();
+        let (restored, _, _) = geometry::release_dock(
+            expected,
+            chosen.work_area,
+            None,
+            expected.x + 46.,
+            expected.y + 46.,
+        )
+        .unwrap();
+        assert!(restored.x >= -800. && restored.right() <= 0.);
+    }
     #[test]
     fn default_is_codex_only_and_unknown_terminal_is_not_eligible() {
         let mut e = Engine::default();
         let mut w = OtherWindow {
             id: 1,
+            owner_pid: 3,
             rect: Rect {
                 x: 0.,
                 y: 0.,
@@ -751,12 +1477,14 @@ mod tests {
         e.windows = vec![
             OtherWindow {
                 id: 1,
+                owner_pid: 3,
                 rect,
                 codex: false,
                 dockable: true,
             },
             OtherWindow {
                 id: 2,
+                owner_pid: 3,
                 rect,
                 codex: true,
                 dockable: true,
@@ -774,6 +1502,7 @@ mod tests {
         e.windows = vec![
             OtherWindow {
                 id: 1,
+                owner_pid: 3,
                 rect: Rect {
                     x: 200.,
                     y: 100.,
@@ -785,6 +1514,7 @@ mod tests {
             },
             OtherWindow {
                 id: 2,
+                owner_pid: 3,
                 rect: Rect {
                     x: 100.,
                     y: 100.,
@@ -795,19 +1525,19 @@ mod tests {
                 dockable: true,
             },
         ];
-        assert!(e.release_target(250., 150.).is_none());
-        assert_eq!(e.release_target(150., 150.).unwrap().id, 2);
+        assert!(hit(&e, 250., 150.).is_none());
+        assert_eq!(hit(&e, 150., 150.).unwrap().id, 2);
         e.view.preferences.window_mode = WindowMode::All;
-        assert_eq!(e.release_target(250., 150.).unwrap().id, 1);
+        assert_eq!(hit(&e, 250., 150.).unwrap().id, 1);
         e.view.preferences.window_mode = WindowMode::Off;
-        assert!(e.release_target(150., 150.).is_none());
-        assert!(e.release_target(900., 600.).is_none());
+        assert!(hit(&e, 150., 150.).is_none());
+        assert!(hit(&e, 900., 600.).is_none());
         // A small/floating foreground window is an occluder, not a dock target.
         e.view.preferences.window_mode = WindowMode::All;
         e.windows[0].dockable = false;
         e.windows[0].codex = true;
-        assert!(e.release_target(250., 150.).is_none());
-        assert_eq!(e.release_target(150., 150.).unwrap().id, 2);
+        assert!(hit(&e, 250., 150.).is_none());
+        assert_eq!(hit(&e, 150., 150.).unwrap().id, 2);
     }
     #[test]
     fn preference_and_contact_updates_do_not_change_layout_anchor() {
@@ -863,6 +1593,7 @@ mod tests {
             started: Instant::now(),
             last_cursor: (446., 346.),
             release_frame: None,
+            resume_motion: None,
         };
         e.drag = Some(new_drag());
         // Mouse has moved 20px after the actual click was released.
@@ -888,14 +1619,9 @@ mod tests {
             e.drag.as_ref().unwrap().release_point(frame, None),
             (446., 346.)
         );
-        let (docked, _, y) = geometry::release_dock(
-            returned,
-            screen.work_area,
-            e.release_target(446., 346.),
-            446.,
-            346.,
-        )
-        .unwrap();
+        let (docked, _, y) =
+            geometry::release_dock(returned, screen.work_area, hit(&e, 446., 346.), 446., 346.)
+                .unwrap();
         assert_eq!(docked.y, 0.);
         assert_eq!(y.unwrap().source, Source::Screen);
     }
@@ -918,6 +1644,7 @@ mod tests {
             started: Instant::now(),
             last_cursor: (446., 346.),
             release_frame: Some(frame),
+            resume_motion: None,
         };
         let other_frame = Rect {
             x: 0.,
@@ -964,6 +1691,7 @@ mod tests {
             started: Instant::now(),
             last_cursor: (446., 346.),
             release_frame: None,
+            resume_motion: None,
         });
         // The entire up interval was missed; this is already another mouse press.
         assert!(e.sample_drag(screen, 466., 346., true, frame).is_some());
@@ -996,6 +1724,7 @@ mod tests {
         };
         e.windows.push(OtherWindow {
             id: 5,
+            owner_pid: 3,
             rect: Rect {
                 x: 500.,
                 y: 100.,

@@ -95,4 +95,4 @@ async function magnetCommand(command: string, args?: Record<string, unknown>): P
 export const getNativeMagnetState = () => magnetCommand('get_magnet_state')
 export const setNativeMagnetPreferences = (preferences: MagnetPreferences) => magnetCommand('set_magnet_preferences', { preferences })
 export const beginNativeMagneticDrag = (anchorX: number, anchorY: number) => magnetCommand('begin_magnetic_drag', { anchorX, anchorY })
-export const endNativeMagneticDrag = (release?: { anchorX: number; anchorY: number; moved: boolean }) => magnetCommand('end_magnetic_drag', release)
+export const endNativeMagneticDrag = (release?: { anchorX: number; anchorY: number; moved: boolean }) => magnetCommand('end_magnetic_drag', { ...release, reducedMotion: matchMedia('(prefers-reduced-motion: reduce)').matches })
